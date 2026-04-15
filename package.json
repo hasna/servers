@@ -1,0 +1,65 @@
+{
+  "name": "@hasna/servers",
+  "version": "0.1.0",
+  "description": "Server management for AI coding agents — CLI + MCP server",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "servers": "dist/cli/index.js",
+    "servers-mcp": "dist/mcp/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev:cli": "bun run src/cli/index.ts",
+    "dev:mcp": "bun run src/mcp/index.ts"
+  },
+  "keywords": [
+    "servers",
+    "mcp",
+    "ai",
+    "coding-agent",
+    "cli"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hasna/servers.git"
+  },
+  "homepage": "https://github.com/hasna/servers",
+  "bugs": {
+    "url": "https://github.com/hasna/servers/issues"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@hasna/cloud": "0.1.28",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}
