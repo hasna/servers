@@ -62,8 +62,8 @@ function getVersion(): string {
   } catch { return "0.0.0"; }
 }
 
-function initDb(opts?: { dbPath?: string }) {
-  if (opts?.dbPath) process.env["SERVERS_DB_PATH"] = opts.dbPath;
+function initDb(opts?: { db?: string }) {
+  if (opts?.db) process.env["SERVERS_DB_PATH"] = opts.db;
   const db = getDatabase();
   ensureSchema(db);
   return db;
@@ -97,7 +97,11 @@ program
   .name("servers")
   .description("Server management for AI coding agents")
   .version(getVersion())
-  .option("--db <path>", "Path to SQLite database");
+  .option("--db <path>", "Path to SQLite database")
+  .hook("preAction", (thisCmd) => {
+    const opts = thisCmd.optsWithGlobals();
+    if (opts.db) process.env["SERVERS_DB_PATH"] = opts.db;
+  });
 
 // ── Dashboard (default) ──────────────────────────────────────────────────────
 
