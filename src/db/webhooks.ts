@@ -6,7 +6,12 @@ const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
 function isPrivateOrInternal(ip: string): boolean {
-  const parts = ip.split(".").map(Number);
+  const normalized = ip.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) {
+    return true;
+  }
+
+  const parts = normalized.split(".").map(Number);
   if (parts.length !== 4) return true;
   const a = parts[0]!;
   const b = parts[1]!;
@@ -26,8 +31,8 @@ export function validateWebhookUrl(urlString: string): { valid: false; error: st
     if (url.protocol !== "https:") {
       return { valid: false, error: "Webhook URLs must use HTTPS" };
     }
-    const hostname = url.hostname.toLowerCase();
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "0.0.0.0") {
+    const hostname = url.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "0.0.0.0" || hostname === "::") {
       return { valid: false, error: "Webhook URLs cannot target localhost" };
     }
     if (hostname === "169.254.169.254" || hostname.startsWith("169.254.")) {
@@ -172,32 +177,35 @@ function matchesScope(wh: Webhook, payload: Record<string, unknown>): boolean {
   return true;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function deliverWebhook(
   wh: Webhook,
   event: string,
   body: string,
-  attempt: number,
   db: Database,
 ): Promise<void> {
   try {
     const url = new URL(wh.url);
-    const hostname = url.hostname.toLowerCase();
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname === "::1") {
-      logDelivery(db, wh.id, event, body, null, "Blocked: localhost", attempt);
+    const hostname = url.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname === "::1" || hostname === "::") {
+      logDelivery(db, wh.id, event, body, null, "Blocked: localhost", 1);
       return;
     }
     const ipCheck = await resolveAndCheckIp(hostname);
     if (!ipCheck.allowed) {
-      logDelivery(db, wh.id, event, body, null, `Blocked: ${ipCheck.error}`, attempt);
+      logDelivery(db, wh.id, event, body, null, `Blocked: ${ipCheck.error}`, 1);
       return;
     }
   } catch {
-    logDelivery(db, wh.id, event, body, null, `Invalid URL: ${wh.url}`, attempt);
+    logDelivery(db, wh.id, event, body, null, `Invalid URL: ${wh.url}`, 1);
     return;
   }
 
   if (activeDeliveries >= MAX_CONCURRENT_DELIVERIES) {
-    logDelivery(db, wh.id, event, body, null, "Dropped: too many concurrent deliveries", attempt);
+    logDelivery(db, wh.id, event, body, null, "Dropped: too many concurrent deliveries", 1);
     return;
   }
 
@@ -210,30 +218,26 @@ async function deliverWebhook(
       const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
       headers["X-Webhook-Signature"] = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, "0")).join("");
     }
-    const resp = await fetch(wh.url, { method: "POST", headers, body });
-    const respText = await resp.text().catch(() => "");
-    logDelivery(db, wh.id, event, body, resp.status, respText.slice(0, 1000), attempt);
 
-    if (resp.status >= 400 && attempt < MAX_RETRY_ATTEMPTS) {
-      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      setTimeout(() => {
-        deliverWebhook(wh, event, body, attempt + 1, db).catch((retryErr) => {
-          console.error(`[webhook] Retry failed for webhook ${wh.id}:`, retryErr);
-        });
-      }, delay);
-    }
-  } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    logDelivery(db, wh.id, event, body, null, errorMsg.slice(0, 1000), attempt);
-    console.error(`[webhook] Delivery failed for webhook ${wh.id} (attempt ${attempt}):`, errorMsg);
+    for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+      try {
+        const resp = await fetch(wh.url, { method: "POST", headers, body });
+        const respText = await resp.text().catch(() => "");
+        logDelivery(db, wh.id, event, body, resp.status, respText.slice(0, 1000), attempt);
+        if (resp.status < 400) return;
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        logDelivery(db, wh.id, event, body, null, errorMsg.slice(0, 1000), attempt);
+        if (attempt === MAX_RETRY_ATTEMPTS) {
+          console.error(`[webhook] Delivery failed for webhook ${wh.id} (attempt ${attempt}):`, errorMsg);
+          return;
+        }
+      }
 
-    if (attempt < MAX_RETRY_ATTEMPTS) {
-      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      setTimeout(() => {
-        deliverWebhook(wh, event, body, attempt + 1, db).catch((retryErr) => {
-          console.error(`[webhook] Retry failed for webhook ${wh.id}:`, retryErr);
-        });
-      }, delay);
+      if (attempt < MAX_RETRY_ATTEMPTS) {
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        await sleep(delay);
+      }
     }
   } finally {
     activeDeliveries--;
@@ -245,11 +249,11 @@ export async function dispatchWebhook(event: string, payload: unknown, db?: Data
   const webhooks = listWebhooks(d).filter(w => w.active && (w.events.length === 0 || w.events.includes(event)));
   const payloadObj = (typeof payload === "object" && payload !== null ? payload : {}) as Record<string, unknown>;
 
-  for (const wh of webhooks) {
-    if (!matchesScope(wh, payloadObj)) continue;
-    const body = JSON.stringify({ event, payload, timestamp: now() });
-    deliverWebhook(wh, event, body, 1, d).catch((err) => {
-      console.error(`[webhook] Dispatch failed for webhook ${wh.id}:`, err);
-    });
-  }
+  await Promise.allSettled(
+    webhooks.map(async (wh) => {
+      if (!matchesScope(wh, payloadObj)) return;
+      const body = JSON.stringify({ event, payload, timestamp: now() });
+      await deliverWebhook(wh, event, body, d);
+    }),
+  );
 }

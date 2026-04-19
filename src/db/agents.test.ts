@@ -174,6 +174,18 @@ describe("updateAgent", () => {
     expect(updated.working_dir).toBe("/tmp/new");
   });
 
+  it("updates description", () => {
+    const a = registerAgent({ name: "marcus", description: "old" });
+    const updated = updateAgent(a.id, { description: "new" });
+    expect(updated.description).toBe("new");
+  });
+
+  it("updates capabilities", () => {
+    const a = registerAgent({ name: "marcus", capabilities: ["review"] });
+    const updated = updateAgent(a.id, { capabilities: ["design", "review"] });
+    expect(updated.capabilities).toEqual(["design", "review"]);
+  });
+
   it("updates metadata", () => {
     const a = registerAgent({ name: "marcus" });
     const updated = updateAgent(a.id, { metadata: { key: "value" } });

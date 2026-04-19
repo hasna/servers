@@ -110,7 +110,7 @@ export function listAgents(status?: string, db?: Database): Agent[] {
   return rows.map(rowToAgent);
 }
 
-export function updateAgent(id: string, updates: { session_id?: string | null; working_dir?: string | null; metadata?: Record<string, unknown> }, db?: Database): Agent {
+export function updateAgent(id: string, updates: { description?: string | null; capabilities?: string[]; session_id?: string | null; working_dir?: string | null; metadata?: Record<string, unknown> }, db?: Database): Agent {
   const d = db || getDatabase();
   const existing = getAgent(id, d);
   if (!existing) throw new AgentNotFoundError(id);
@@ -118,6 +118,8 @@ export function updateAgent(id: string, updates: { session_id?: string | null; w
   const parts: string[] = [];
   const values: (string | number | null)[] = [];
 
+  if (updates.description !== undefined) { parts.push("description = ?"); values.push(updates.description); }
+  if (updates.capabilities !== undefined) { parts.push("capabilities = ?"); values.push(JSON.stringify(updates.capabilities)); }
   if (updates.session_id !== undefined) { parts.push("session_id = ?"); values.push(updates.session_id); }
   if (updates.working_dir !== undefined) { parts.push("working_dir = ?"); values.push(updates.working_dir); }
   if (updates.metadata !== undefined) { parts.push("metadata = ?"); values.push(JSON.stringify(updates.metadata)); }

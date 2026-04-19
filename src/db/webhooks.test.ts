@@ -50,13 +50,9 @@ describe("validateWebhookUrl", () => {
   });
 
   it("rejects ::1 URLs", () => {
-    // Note: URL parser keeps brackets → hostname is "[::1]" which the validator
-    // doesn't match against "::1", so this passes through. Still accepted per current code.
     const r = validateWebhookUrl("https://[::1]/hook");
-    // The check is hostname === "::1" and hostname.startsWith("169.254.")
-    // [::1] doesn't match those, but it DOES match /^fc00:/i or /^fe80:/i? No.
-    // So it passes validation. This reflects current behavior.
-    expect(r.valid).toBe(true);
+    expect(r.valid).toBe(false);
+    expect((r as any).error).toContain("localhost");
   });
 
   it("rejects 0.0.0.0 URLs", () => {
@@ -229,17 +225,33 @@ describe("listDeliveries", () => {
 // ── dispatchWebhook ────────────────────────────────────────────────────────
 
 describe("dispatchWebhook", () => {
-  beforeEach(setup);
-  afterEach(teardown);
+  let dnsSpy: ReturnType<typeof spyOn>;
+  let fetchSpy: ReturnType<typeof spyOn>;
 
-  it("dispatches to matching webhooks", async () => {
+  beforeEach(() => {
+    setup();
+    dnsSpy = spyOn(Bun.dns, "lookup");
+    dnsSpy.mockResolvedValue({ address: "93.184.216.34", family: 4 } as any);
+    fetchSpy = spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValue(new Response("ok", { status: 204 }) as any);
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    dnsSpy.mockRestore();
+    teardown();
+  });
+
+  it("dispatches to matching webhooks and records delivery", async () => {
     createWebhook({
       url: "https://example.com/hook",
       events: ["server.started"],
     });
-    // No error means it ran (the actual fetch will fail because example.com doesn't respond properly,
-    // but the function itself doesn't throw)
     await dispatchWebhook("server.started", { server_id: "srv-1" });
+    const deliveries = listDeliveries();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.status_code).toBe(204);
   });
 
   it("does not dispatch to webhooks with non-matching events", async () => {
@@ -248,6 +260,8 @@ describe("dispatchWebhook", () => {
       events: ["server.stopped"],
     });
     await dispatchWebhook("server.started", { server_id: "srv-1" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(listDeliveries()).toEqual([]);
   });
 
   it("dispatches to webhooks with no event filter (empty events)", async () => {
@@ -256,6 +270,8 @@ describe("dispatchWebhook", () => {
       events: [],
     });
     await dispatchWebhook("any.event", { server_id: "srv-1" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(listDeliveries()).toHaveLength(1);
   });
 
   it("does not dispatch inactive webhooks", async () => {
@@ -263,6 +279,8 @@ describe("dispatchWebhook", () => {
     const db = getDatabase();
     db.run("UPDATE webhooks SET active = 0 WHERE id = ?", [wh.id]);
     await dispatchWebhook("server.started", { server_id: "srv-1" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(listDeliveries()).toEqual([]);
   });
 
   it("does not dispatch to webhook with non-matching server_id scope", async () => {
@@ -274,6 +292,8 @@ describe("dispatchWebhook", () => {
       server_id: server.id,
     });
     await dispatchWebhook("server.started", { server_id: "some-other-id" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(listDeliveries()).toEqual([]);
   });
 
   it("dispatches to webhook with matching server_id scope", async () => {
@@ -285,6 +305,8 @@ describe("dispatchWebhook", () => {
       server_id: server.id,
     });
     await dispatchWebhook("server.started", { server_id: server.id });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(listDeliveries()).toHaveLength(1);
   });
 
   it("handles non-object payload gracefully", async () => {
@@ -293,6 +315,8 @@ describe("dispatchWebhook", () => {
       events: ["server.started"],
     });
     await dispatchWebhook("server.started", "not an object");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(listDeliveries()).toHaveLength(1);
   });
 
   it("handles null payload gracefully", async () => {
@@ -301,5 +325,7 @@ describe("dispatchWebhook", () => {
       events: ["server.started"],
     });
     await dispatchWebhook("server.started", null);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(listDeliveries()).toHaveLength(1);
   });
 });
