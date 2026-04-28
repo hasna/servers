@@ -22,10 +22,13 @@ Manage servers, agents, operations, webhooks, and audit trails across repositori
 
 ```bash
 # List servers
-servers server
+servers servers
 
 # Create a server
-servers server:add --name "api-server" --project "my-project"
+servers servers:add --name "api-server" --project "my-project"
+
+# Register a Tailscale-accessible server
+servers servers:add --name "api-server" --tailscale-hostname spark01 --tailscale-port 3000
 
 # Register an agent
 servers agent:register --name "marcus" --description "architect"
@@ -35,6 +38,9 @@ servers operations --server "api-server"
 
 # Create a webhook
 servers webhook:add --url "https://hooks.example.com/notify" --events "server.started"
+
+# Show webhook delivery logs
+servers webhooks:logs
 ```
 
 ## MCP

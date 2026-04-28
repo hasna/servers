@@ -63,6 +63,52 @@ describe("CLI integration tests", () => {
     }
   });
 
+  test("servers command is the primary list command and server remains an alias", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      await run(`${CLI} ${dbFlag} servers:add -n "Plural Server" --slug plural`);
+
+      const { stdout: plural } = await run(`${CLI} ${dbFlag} servers`);
+      expect(plural).toContain("Plural Server");
+      expect(plural).toContain("TAILSCALE URL");
+
+      const { stdout: singular } = await run(`${CLI} ${dbFlag} server`);
+      expect(singular).toContain("Plural Server");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("server CLI exposes Tailscale URL metadata in list and get output", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    const previousTailnet = process.env.TAILSCALE_TAILNET;
+    process.env.TAILSCALE_TAILNET = "example-tailnet";
+
+    try {
+      await run(`${CLI} ${dbFlag} servers:add -n "Tail Server" --slug tail --hostname spark01 --tailscale-hostname spark01 --tailscale-port 7010`);
+
+      const { stdout: listed } = await run(`${CLI} ${dbFlag} servers`);
+      expect(listed).toContain("https://spark01.example-tailnet.ts.net:7010");
+
+      const { stdout: got } = await run(`${CLI} ${dbFlag} servers:get tail`);
+      expect(got).toContain("Tailscale:");
+      expect(got).toContain("https://spark01.example-tailnet.ts.net:7010");
+
+      const { stdout: json } = await run(`${CLI} ${dbFlag} servers:get tail --json`);
+      const parsed = JSON.parse(json);
+      expect(parsed.metadata.tailscale_hostname).toBe("spark01");
+      expect(parsed.metadata.tailscale_port).toBe(7010);
+      expect(parsed.tailscale_url).toBe("https://spark01.example-tailnet.ts.net:7010");
+    } finally {
+      if (previousTailnet === undefined) {
+        delete process.env.TAILSCALE_TAILNET;
+      } else {
+        process.env.TAILSCALE_TAILNET = previousTailnet;
+      }
+      cleanup();
+    }
+  });
+
   test("agent lifecycle: register, update, heartbeat", async () => {
     const { dbFlag, cleanup } = withTmpDb();
     try {
@@ -158,6 +204,21 @@ describe("CLI integration tests", () => {
     }
   });
 
+  test("webhook logs command uses plural naming and keeps delivery alias", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      await run(`${CLI} ${dbFlag} webhook:add --url https://example.com/hook --events server.created`);
+
+      const { stdout: logs } = await run(`${CLI} ${dbFlag} webhooks:logs`);
+      expect(logs).toContain("WEBHOOK");
+
+      const { stdout: oldAlias } = await run(`${CLI} ${dbFlag} webhook:deliveries`);
+      expect(oldAlias).toContain("WEBHOOK");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("JSON output format", async () => {
     const { dbFlag, cleanup } = withTmpDb();
     try {
@@ -177,6 +238,10 @@ describe("CLI integration tests", () => {
       const { stdout } = await run(`${CLI} completion ${shell}`);
       expect(stdout.length).toBeGreaterThan(10);
       expect(stdout).toContain("server");
+      expect(stdout).toContain("servers:add");
+      expect(stdout).toContain("server:add");
+      expect(stdout).toContain("webhooks:logs");
+      expect(stdout).toContain("webhook:deliveries");
     }
   });
 });

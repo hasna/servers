@@ -12,6 +12,7 @@ import {
   heartbeatServer,
 } from "../../db/servers.js";
 import { dispatchWebhook } from "../../db/webhooks.js";
+import { getTailscaleUrl } from "../../utils/tailscale.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -32,7 +33,10 @@ export function registerServerTools(server: McpServer, { shouldRegisterTool, for
         path: z.string().optional().describe("SSH path or local path"),
         description: z.string().optional(),
         status: z.enum(["online", "offline", "starting", "stopping", "restarting", "deploying", "maintenance", "unknown"]).optional(),
-        metadata: z.record(z.unknown()).optional(),
+        metadata: z.object({
+          tailscale_hostname: z.string().optional().describe("Tailscale machine name (e.g. spark01)"),
+          tailscale_port: z.number().optional().describe("Port the server listens on for Tailscale URL"),
+        }).catchall(z.unknown()).optional().describe("Server metadata, including Tailscale config"),
         project_id: z.string().optional(),
       },
       async ({ name, slug, hostname, path, description, status, metadata, project_id }) => {
@@ -54,7 +58,9 @@ export function registerServerTools(server: McpServer, { shouldRegisterTool, for
           let s = getServer(id_or_slug);
           if (!s) s = getServerBySlug(id_or_slug);
           if (!s) return { content: [{ type: "text" as const, text: `Server not found: ${id_or_slug}` }], isError: true };
-          return { content: [{ type: "text" as const, text: JSON.stringify(s, null, 2) }] };
+          const tailscaleUrl = getTailscaleUrl(s);
+          const output = { ...s, tailscale_url: tailscaleUrl };
+          return { content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );
@@ -69,7 +75,10 @@ export function registerServerTools(server: McpServer, { shouldRegisterTool, for
         try {
           const servers = listServers(project_id);
           if (servers.length === 0) return { content: [{ type: "text" as const, text: "No servers found." }] };
-          const lines = servers.map(s => `${s.id.slice(0, 8)}  ${s.status.padEnd(12)} ${s.name.padEnd(20)} ${s.slug}  ${s.hostname || "-"}`);
+          const lines = servers.map(s => {
+            const ts = getTailscaleUrl(s);
+            return `${s.id.slice(0, 8)}  ${s.status.padEnd(12)} ${s.name.padEnd(20)} ${s.slug}  ${s.hostname || "-"}  ${ts || "-"}`;
+          });
           return { content: [{ type: "text" as const, text: lines.join("\n") }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },

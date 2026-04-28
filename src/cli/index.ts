@@ -62,6 +62,8 @@ import {
   deleteWebhook,
   dispatchWebhook,
 } from "../db/webhooks.js";
+import { getTailscaleUrl } from "../utils/tailscale.js";
+import type { Server, UpdateServerInput } from "../types/index.js";
 
 function getVersion(): string {
   try {
@@ -110,6 +112,49 @@ function formatTable(headers: string[], rows: string[][]): string {
   return `${header}\n${separator}\n${body}`;
 }
 
+function parseJsonObject(value: string, optionName: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    console.error(chalk.red(`${optionName} must be a valid JSON object`));
+    process.exit(1);
+  }
+}
+
+function buildServerMetadata(opts: {
+  metadata?: string;
+  tailscaleHostname?: string;
+  tailscalePort?: string;
+}): Record<string, unknown> | undefined {
+  const metadata = opts.metadata ? parseJsonObject(opts.metadata, "--metadata") : {};
+
+  if (opts.tailscaleHostname !== undefined) {
+    metadata.tailscale_hostname = opts.tailscaleHostname;
+  }
+
+  if (opts.tailscalePort !== undefined) {
+    const port = Number.parseInt(opts.tailscalePort, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      console.error(chalk.red("--tailscale-port must be an integer from 1 to 65535"));
+      process.exit(1);
+    }
+    metadata.tailscale_port = port;
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function serverWithComputedFields(server: Server): Server & { tailscale_url: string | null } {
+  return {
+    ...server,
+    tailscale_url: getTailscaleUrl(server),
+  };
+}
+
 // ── Program ──────────────────────────────────────────────────────────────────
 
 const program = new Command();
@@ -136,7 +181,7 @@ program
     const traces = listTraces(undefined, undefined, 5, db);
 
     if (opts.format === "json") {
-      console.log(JSON.stringify({ servers, agents, operations: ops, traces }, null, 2));
+      console.log(JSON.stringify({ servers: servers.map(serverWithComputedFields), agents, operations: ops, traces }, null, 2));
       closeDatabase();
       return;
     }
@@ -179,7 +224,8 @@ program
 // ── Servers ──────────────────────────────────────────────────────────────────
 
 program
-  .command("server")
+  .command("servers")
+  .alias("server")
   .description("List registered servers")
   .option("-p, --project <id>", "Filter by project")
   .option("--json", "Output as JSON")
@@ -187,23 +233,25 @@ program
     const db = initDb(opts);
     const servers = listServers(opts.project, db);
     if (opts.json) {
-      console.log(JSON.stringify(servers, null, 2));
+      console.log(JSON.stringify(servers.map(serverWithComputedFields), null, 2));
     } else {
-      const headers = ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME"];
+      const headers = ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL"];
       const rows = servers.map(s => [
         s.id.slice(0, 8),
         s.status === "online" ? chalk.green(s.status) : s.status === "offline" ? chalk.red(s.status) : chalk.yellow(s.status),
         chalk.bold(s.name),
         s.slug,
         s.hostname || "-",
+        getTailscaleUrl(s) || "-",
       ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", ""]]));
+      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", "", ""]]));
     }
     closeDatabase();
   });
 
 program
-  .command("server:add")
+  .command("servers:add")
+  .alias("server:add")
   .description("Register a new server")
   .requiredOption("-n, --name <name>", "Server name")
   .option("--slug <slug>", "URL-friendly slug")
@@ -212,8 +260,12 @@ program
   .option("--description <desc>", "Description")
   .option("--status <status>", "Initial status (default: unknown)")
   .option("--project <id>", "Project ID")
+  .option("--metadata <json>", "Server metadata as a JSON object")
+  .option("--tailscale-hostname <name>", "Tailscale machine name for URL output")
+  .option("--tailscale-port <port>", "Port for Tailscale URL output")
   .action(async (opts) => {
     const db = initDb(opts);
+    const metadata = buildServerMetadata(opts);
     const server = createServer({
       name: opts.name,
       slug: opts.slug,
@@ -221,6 +273,7 @@ program
       path: opts.path,
       description: opts.description,
       status: opts.status,
+      metadata,
       project_id: opts.project,
     }, db);
     await emitWebhook("server.created", { server_id: server.id, project_id: server.project_id, server }, db);
@@ -229,7 +282,8 @@ program
   });
 
 program
-  .command("server:update")
+  .command("servers:update")
+  .alias("server:update")
   .description("Update a server")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .option("--name <name>", "New name")
@@ -239,6 +293,9 @@ program
   .option("--description <desc>", "Description")
   .option("--status <status>", "New status")
   .option("--project <id>", "Project ID")
+  .option("--metadata <json>", "Replace server metadata with a JSON object")
+  .option("--tailscale-hostname <name>", "Set Tailscale machine name for URL output")
+  .option("--tailscale-port <port>", "Set port for Tailscale URL output")
   .action(async (idOrSlug, opts) => {
     const db = initDb(opts);
     let server = getServer(idOrSlug, db);
@@ -251,7 +308,7 @@ program
       console.error(chalk.red(`Server not found: ${idOrSlug}`));
       process.exit(1);
     }
-    const update: Record<string, string> = {};
+    const update: UpdateServerInput = {};
     if (opts.name !== undefined) update.name = opts.name;
     if (opts.slug !== undefined) update.slug = opts.slug;
     if (opts.hostname !== undefined) update.hostname = opts.hostname;
@@ -259,8 +316,15 @@ program
     if (opts.description !== undefined) update.description = opts.description;
     if (opts.status !== undefined) update.status = opts.status;
     if (opts.project !== undefined) update.project_id = opts.project;
+    const metadataPatch = buildServerMetadata(opts);
+    if (metadataPatch !== undefined) {
+      update.metadata = {
+        ...server.metadata,
+        ...metadataPatch,
+      };
+    }
     if (Object.keys(update).length === 0) {
-      console.error(chalk.yellow("No fields to update. Use --name, --status, etc."));
+      console.error(chalk.yellow("No fields to update. Use --name, --status, --metadata, --tailscale-hostname, etc."));
       process.exit(1);
     }
     const updated = updateServer(server.id, update as any, db);
@@ -270,7 +334,8 @@ program
   });
 
 program
-  .command("server:get")
+  .command("servers:get")
+  .alias("server:get")
   .description("Get server details")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .option("--json", "Output as JSON")
@@ -286,8 +351,9 @@ program
       console.error(chalk.red(`Server not found: ${idOrSlug}`));
       process.exit(1);
     }
+    const output = serverWithComputedFields(server);
     if (opts.json) {
-      console.log(JSON.stringify(server, null, 2));
+      console.log(JSON.stringify(output, null, 2));
     } else {
       console.log(chalk.bold("Server:"));
       console.log(`  ID:          ${server.id}`);
@@ -295,6 +361,7 @@ program
       console.log(`  Slug:        ${server.slug}`);
       console.log(`  Status:      ${server.status}`);
       console.log(`  Hostname:    ${server.hostname || "-"}`);
+      console.log(`  Tailscale:   ${output.tailscale_url || "-"}`);
       console.log(`  Path:        ${server.path || "-"}`);
       console.log(`  Project:     ${server.project_id || "-"}`);
       console.log(`  Locked by:   ${server.locked_by || "-"}`);
@@ -305,7 +372,8 @@ program
   });
 
 program
-  .command("server:delete")
+  .command("servers:delete")
+  .alias("server:delete")
   .description("Delete a server (must not be locked)")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .action(async (idOrSlug, opts) => {
@@ -327,7 +395,8 @@ program
   });
 
 program
-  .command("server:lock")
+  .command("servers:lock")
+  .alias("server:lock")
   .description("Lock a server (prevent modifications)")
   .requiredOption("--agent <id>", "Agent ID requesting lock")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
@@ -355,7 +424,8 @@ program
   });
 
 program
-  .command("server:unlock")
+  .command("servers:unlock")
+  .alias("server:unlock")
   .description("Unlock a server")
   .requiredOption("--agent <id>", "Agent ID that holds the lock")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
@@ -807,7 +877,8 @@ program
 // ── Server: restart / stop ───────────────────────────────────────────────────
 
 program
-  .command("server:restart")
+  .command("servers:restart")
+  .alias("server:restart")
   .description("Create a restart operation + trace for a server")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .option("--agent <id>", "Agent ID")
@@ -832,7 +903,8 @@ program
   });
 
 program
-  .command("server:stop")
+  .command("servers:stop")
+  .alias("server:stop")
   .description("Create a stop operation + trace for a server")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .option("--agent <id>", "Agent ID")
@@ -857,7 +929,8 @@ program
   });
 
 program
-  .command("server:heartbeat")
+  .command("servers:heartbeat")
+  .alias("server:heartbeat")
   .description("Send a heartbeat for a server")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
   .action(async (idOrSlug, opts) => {
@@ -969,8 +1042,9 @@ program
 // ── Webhook: deliveries ──────────────────────────────────────────────────────
 
 program
-  .command("webhook:deliveries")
-  .description("List webhook delivery history")
+  .command("webhooks:logs")
+  .alias("webhook:deliveries")
+  .description("List webhook delivery logs")
   .option("--webhook <id>", "Filter by webhook")
   .option("-l, --limit <n>", "Limit results", "50")
   .option("--json", "Output as JSON")
@@ -1040,7 +1114,8 @@ program
       console.log(chalk.bold("\n  Servers"));
       for (const s of servers) {
         const color = s.status === "online" ? chalk.green : s.status === "offline" ? chalk.red : chalk.yellow;
-        console.log(`    ${color(s.status.padEnd(11))} ${s.name.padEnd(20)} ${s.hostname || "-"}`);
+        const url = getTailscaleUrl(s);
+        console.log(`    ${color(s.status.padEnd(11))} ${s.name.padEnd(20)} ${s.hostname || "-"}${url ? `  ${url}` : ""}`);
       }
       if (servers.length === 0) console.log("    (no servers)");
 
@@ -1151,11 +1226,11 @@ program
     const globalOptions = ["--db", "--format", "--help", "--version"];
 
     function getAllCommands(): { name: string; desc: string; options: string[] }[] {
-      return commands.map(c => ({
-        name: c.name(),
-        desc: c.description() || "",
-        options: c.options.map(o => o.long || o.short || ""),
-      }));
+      return commands.flatMap(c => {
+        const desc = c.description() || "";
+        const options = c.options.map(o => o.long || o.short || "");
+        return [c.name(), ...c.aliases()].map(name => ({ name, desc, options }));
+      });
     }
 
     if (shell === "bash") {
