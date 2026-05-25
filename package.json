@@ -1,6 +1,6 @@
 {
   "name": "@hasna/servers",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Server management for AI coding agents — CLI + MCP server",
   "type": "module",
   "main": "dist/index.js",
