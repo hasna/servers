@@ -45,11 +45,28 @@ servers webhooks:logs
 
 ## MCP
 
-Run as MCP server with stdio transport:
+Run as MCP server with stdio transport (default):
 
 ```bash
 servers-mcp
 ```
+
+### HTTP mode
+
+Long-lived shared HTTP server (Streamable HTTP, stateless):
+
+```bash
+servers-mcp --http
+# or: MCP_HTTP=1 servers-mcp
+
+# Custom port (default 8834)
+servers-mcp --http --port 8834
+```
+
+Endpoints (bound to `127.0.0.1` only):
+
+- `GET /health` → `{"status":"ok","name":"servers"}`
+- `POST /mcp` — MCP Streamable HTTP endpoint
 
 ## SDK
 

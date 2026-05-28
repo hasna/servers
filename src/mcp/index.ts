@@ -1,56 +1,46 @@
 #!/usr/bin/env bun
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { registerServerTools } from "./tools/servers.js";
-import { registerOperationTools } from "./tools/operations.js";
-import { registerAgentTools } from "./tools/agents.js";
-import { registerTraceTools } from "./tools/traces.js";
-import { registerWebhookTools } from "./tools/webhooks.js";
-import { registerProjectTools } from "./tools/projects.js";
-import { registerLockTools } from "./tools/locks.js";
+
+import { parseMcpArgs, isHttpMode, resolveHttpPort } from "./args.js";
+import { buildServer, createMcpServer } from "./build-server.js";
+import { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT, MCP_HTTP_HOST } from "./http.js";
+
+export { buildServer } from "./build-server.js";
+export { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT, MCP_HTTP_HOST } from "./http.js";
 
 function getMcpVersion(): string {
   try {
     const __dir = dirname(fileURLToPath(import.meta.url));
     const pkgPath = join(__dir, "..", "package.json");
     return JSON.parse(readFileSync(pkgPath, "utf-8")).version || "0.0.0";
-  } catch { return "0.0.0"; }
+  } catch {
+    return "0.0.0";
+  }
 }
 
-const server = new McpServer({
-  name: "servers",
-  version: getMcpVersion(),
-});
+const parsedArgs = parseMcpArgs(process.argv.slice(2), getMcpVersion());
+if (parsedArgs) {
+  console.log(parsedArgs.text);
+  process.exit(0);
+}
 
-type Helpers = {
-  shouldRegisterTool: (name: string) => boolean;
-  resolveId: (id: string, table?: string) => string;
-  formatError: (e: unknown) => string;
-};
+async function main(): Promise<void> {
+  if (isHttpMode()) {
+    const port = resolveHttpPort(DEFAULT_MCP_HTTP_PORT);
+    await startMcpHttpServer({
+      port,
+      healthName: "servers",
+      createServer: createMcpServer,
+    });
+    console.error(`servers-mcp HTTP listening on http://${MCP_HTTP_HOST}:${port}/mcp`);
+    return;
+  }
 
-const toolContext: Helpers = {
-  shouldRegisterTool: () => true,
-  resolveId: (id: string) => id, // Simple for now — full resolution in database.ts
-  formatError: (e: unknown) => {
-    if (e instanceof Error) return e.message;
-    return String(e);
-  },
-};
-
-registerServerTools(server, toolContext);
-registerOperationTools(server, toolContext);
-registerAgentTools(server, toolContext);
-registerTraceTools(server, toolContext);
-registerWebhookTools(server, toolContext);
-registerProjectTools(server, toolContext);
-registerLockTools(server, toolContext);
-
-async function main() {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await buildServer().connect(transport);
 }
 
 main().catch((err) => {
