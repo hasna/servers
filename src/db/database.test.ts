@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   getDatabase,
   closeDatabase,
@@ -11,6 +14,10 @@ import {
   LOCK_EXPIRY_MINUTES,
 } from "./database.js";
 import { applyMigrations } from "./migrations.js";
+
+function makeTempDir(): string {
+  return mkdtempSync(join(tmpdir(), "servers-db-test-"));
+}
 
 describe("database", () => {
   beforeEach(() => {
@@ -50,6 +57,46 @@ describe("database", () => {
     expect(names).toContain("resource_locks");
     expect(names).toContain("webhooks");
     expect(names).toContain("webhook_deliveries");
+  });
+
+  it("waits through a transient SQLite startup lock", async () => {
+    const dir = makeTempDir();
+    const dbPath = join(dir, "servers.db");
+    const script = `
+      import { Database } from "bun:sqlite";
+      const db = new Database(${JSON.stringify(dbPath)});
+      db.run("CREATE TABLE IF NOT EXISTS lock_test (id INTEGER)");
+      db.run("BEGIN EXCLUSIVE");
+      console.log("locked");
+      await Bun.sleep(350);
+      db.run("COMMIT");
+      db.close();
+    `;
+    const child = Bun.spawn([process.execPath, "--eval", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("locked")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        output += decoder.decode(chunk.value);
+      }
+
+      resetDatabase();
+      const db = getDatabase(dbPath);
+      const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
+      expect(tables.map((table) => table.name)).toContain("servers");
+      expect(await child.exited).toBe(0);
+    } finally {
+      child.kill();
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

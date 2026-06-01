@@ -377,11 +377,19 @@ export async function getLocalServerSnapshot(
 async function waitForReadiness(
   getServerSnapshot: () => Promise<LocalServerSnapshot>,
   timeoutMs: number,
+  options: { spawnedPid?: number; logFile?: string } = {},
 ): Promise<LocalServerSnapshot> {
   const deadline = Date.now() + timeoutMs;
   let last = await getServerSnapshot();
   while (Date.now() < deadline) {
     if (last.ready) return last;
+    if (options.spawnedPid && !isProcessRunning(options.spawnedPid)) {
+      const logTail = options.logFile ? readLogTail(options.logFile) : null;
+      const suffix = logTail?.trim()
+        ? ` Last log output:\n${logTail.trim()}`
+        : "";
+      throw new Error(`Process ${options.spawnedPid} exited before server became ready.${suffix}`);
+    }
     await sleep(DEFAULT_POLL_MS);
     last = await getServerSnapshot();
   }
@@ -473,6 +481,16 @@ function spawnDetached(config: ResolvedLifecycleConfig): number {
     return child.pid;
   } finally {
     closeSync(out);
+  }
+}
+
+function readLogTail(logFile: string, maxBytes = 4000): string | null {
+  try {
+    if (!existsSync(logFile)) return null;
+    const content = readFileSync(logFile, "utf-8");
+    return content.length > maxBytes ? content.slice(-maxBytes) : content;
+  } catch {
+    return null;
   }
 }
 
@@ -579,7 +597,11 @@ export async function startLocalServer(
 
     const wait = opts.wait ?? true;
     const snapshot = wait
-      ? await waitForReadiness(() => getLocalServerSnapshot(getServer(server.id, db)!), config.readyTimeoutMs)
+      ? await waitForReadiness(
+        () => getLocalServerSnapshot(getServer(server.id, db)!),
+        config.readyTimeoutMs,
+        { spawnedPid: pid, logFile: config.logFile },
+      )
       : await getLocalServerSnapshot(updated);
 
     updated = updateServer(server.id, {
@@ -773,7 +795,11 @@ export async function restartLocalServer(
 
     const snapshot = opts.wait === false
       ? await getLocalServerSnapshot(updated)
-      : await waitForReadiness(() => getLocalServerSnapshot(getServer(server.id, db)!), config.readyTimeoutMs);
+      : await waitForReadiness(
+        () => getLocalServerSnapshot(getServer(server.id, db)!),
+        config.readyTimeoutMs,
+        { spawnedPid: newPid, logFile: config.logFile },
+      );
 
     updated = updateServer(server.id, {
       status: snapshot.ready ? "online" : "starting",

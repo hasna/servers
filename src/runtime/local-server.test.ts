@@ -249,6 +249,52 @@ process.on("SIGTERM", () => process.exit(0));
     }
   });
 
+  it("fails fast with log output when the start command exits before readiness", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    const logFile = join(dir, "early-exit.log");
+
+    try {
+      writeFileSync(
+        join(dir, "exit.js"),
+        `
+console.error("early startup failure");
+process.exit(42);
+`,
+      );
+
+      const server = createServer({
+        name: "early-exit-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "exec bun run exit.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          log_file: logFile,
+        },
+      }, db);
+
+      const startedAt = Date.now();
+      await expect(startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 5000,
+      }, db)).rejects.toThrow(/exited before server became ready.*early startup failure/s);
+
+      expect(Date.now() - startedAt).toBeLessThan(3000);
+      const refreshed = getServer(server.id, db)!;
+      expect(refreshed.status).toBe("offline");
+      expect(refreshed.metadata.pid).toBeUndefined();
+      expect(listOperations(server.id, "failed", 10, db)).toHaveLength(1);
+      expect(checkLock("server-runtime", server.id, db)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("stop with wait false sends SIGTERM without force-killing or marking offline", async () => {
     const dir = makeTempDir();
     const port = await getFreePort();

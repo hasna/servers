@@ -4,6 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import { runMigrations } from "./schema.js";
 
 export const LOCK_EXPIRY_MINUTES = 30;
+const SQLITE_BUSY_RETRY_TIMEOUT_MS = 15_000;
+const SQLITE_BUSY_RETRY_INTERVAL_MS = 100;
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -66,6 +68,35 @@ function ensureDir(filePath: string): void {
 
 let _db: Database | null = null;
 
+function isSqliteBusy(error: unknown): boolean {
+  const record = error as { code?: unknown; message?: unknown } | null;
+  return (
+    record?.code === "SQLITE_BUSY" ||
+    (typeof record?.message === "string" && record.message.includes("database is locked"))
+  );
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withSqliteBusyRetry<T>(operation: () => T): T {
+  const deadline = Date.now() + SQLITE_BUSY_RETRY_TIMEOUT_MS;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      lastError = error;
+      sleepSync(SQLITE_BUSY_RETRY_INTERVAL_MS);
+    }
+  }
+
+  throw lastError;
+}
+
 export function getDatabase(dbPath?: string): Database {
   if (_db) return _db;
 
@@ -73,11 +104,15 @@ export function getDatabase(dbPath?: string): Database {
   ensureDir(path);
 
   _db = new Database(path);
-  _db.run("PRAGMA journal_mode = WAL");
-  _db.run("PRAGMA busy_timeout = 5000");
+  _db.run(`PRAGMA busy_timeout = ${SQLITE_BUSY_RETRY_TIMEOUT_MS}`);
+  withSqliteBusyRetry(() => {
+    _db!.run("PRAGMA journal_mode = WAL");
+  });
   _db.run("PRAGMA foreign_keys = ON");
 
-  runMigrations(_db);
+  withSqliteBusyRetry(() => {
+    runMigrations(_db!);
+  });
 
   return _db;
 }
