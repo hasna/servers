@@ -647,8 +647,29 @@ export async function stopLocalServer(
     let stopped = true;
     if (isProcessRunning(pid)) {
       sendProcessSignal(pid!, "SIGTERM");
-      stopped = opts.wait === false ? false : await waitForStop(pid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
-      if (!stopped && opts.force !== false) {
+      if (opts.wait === false) {
+        const updated = updateServer(server.id, {
+          status: "stopping",
+          metadata: updateRuntimeMetadata(server, {
+            stop_requested_at: now(),
+            stopped_by: agentId,
+            last_reason: opts.reason ?? null,
+          }),
+        }, db);
+        const snapshot = await getLocalServerSnapshot(updated);
+        createTrace({
+          server_id: server.id,
+          operation_id: operation.id,
+          agent_id: agentId,
+          event: "server.stop.signal_sent",
+          details: { pid, wait: false },
+        }, db);
+        const completed = completeOperation(operation.id, db);
+        return { server: updated, operation: completed, snapshot, ready: snapshot.ready, pid: pid ?? undefined };
+      }
+
+      stopped = await waitForStop(pid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
+      if (!stopped && opts.force === true) {
         sendProcessSignal(pid!, "SIGKILL");
         stopped = await waitForStop(pid, 2000);
       }
@@ -715,9 +736,16 @@ export async function restartLocalServer(
     const pid = numberValue(server.metadata.pid) ?? null;
     if (isProcessRunning(pid)) {
       sendProcessSignal(pid!, "SIGTERM");
-      runtimeWasChanged = true;
       const stopped = await waitForStop(pid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
-      if (!stopped && opts.force !== false) sendProcessSignal(pid!, "SIGKILL");
+      if (!stopped && opts.force === true) {
+        sendProcessSignal(pid!, "SIGKILL");
+        const killed = await waitForStop(pid, 2000);
+        if (!killed) {
+          throw new Error(`Server ${server.slug} process ${pid} did not stop after SIGKILL`);
+        }
+      } else if (!stopped) {
+        throw new Error(`Server ${server.slug} process ${pid} did not stop within ${opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS}ms`);
+      }
     }
 
     const intermediate = updateServer(server.id, {

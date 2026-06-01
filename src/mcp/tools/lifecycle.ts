@@ -120,16 +120,17 @@ export function registerLifecycleTools(server: McpServer, { shouldRegisterTool, 
           };
           const slug = slugFromName(serverName);
           const existing = getServerBySlug(slug);
+          if (existing && !force) {
+            throw new Error(`Server already exists: ${existing.slug}. Pass force: true to update it.`);
+          }
           const localServer = existing
-            ? force
-              ? updateServer(existing.id, {
+            ? updateServer(existing.id, {
                   name: serverName,
                   path: detected.cwd,
                   description: description ?? existing.description,
                   metadata: { ...existing.metadata, ...metadata },
                   project_id,
                 })
-              : existing
             : createServer({
                 name: serverName,
                 path: detected.cwd,

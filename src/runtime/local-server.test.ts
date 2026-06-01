@@ -14,6 +14,7 @@ import { checkLock } from "../db/locks.js";
 import {
   detectProjectServerConfig,
   getLocalServerSnapshot,
+  restartLocalServer,
   startLocalServer,
   stopLocalServer,
 } from "./local-server.js";
@@ -132,7 +133,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
         status: "offline",
         path: dir,
         metadata: {
-          start_command: "bun run server.js",
+          start_command: "exec bun run server.js",
           cwd: dir,
           port,
           health_url: `http://127.0.0.1:${port}`,
@@ -222,7 +223,7 @@ process.on("SIGTERM", () => process.exit(0));
         status: "offline",
         path: dir,
         metadata: {
-          start_command: "bun run server.js",
+          start_command: "exec bun run server.js",
           cwd: dir,
           port,
           health_url: `http://127.0.0.1:${port}`,
@@ -244,6 +245,202 @@ process.on("SIGTERM", () => process.exit(0));
       expect(listOperations(server.id, "failed", 10, db)).toHaveLength(1);
       expect(checkLock("server-runtime", server.id, db)).toBeNull();
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stop with wait false sends SIGTERM without force-killing or marking offline", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let pid: number | undefined;
+
+    try {
+      writeFileSync(
+        join(dir, "server.js"),
+        `
+const { writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const http = require("node:http");
+const server = http.createServer((_req, res) => res.end("ok"));
+writeFileSync(join(process.cwd(), "pid.txt"), String(process.pid));
+server.listen(Number(process.env.PORT), "127.0.0.1");
+process.on("SIGTERM", () => {
+  writeFileSync(join(process.cwd(), "term.txt"), "term");
+  setTimeout(() => {
+    writeFileSync(join(process.cwd(), "graceful.txt"), "graceful");
+    process.exit(0);
+  }, 500);
+});
+`,
+      );
+
+      const server = createServer({
+        name: "no-wait-stop-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "exec bun run server.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 8000,
+      }, db);
+      pid = started.pid;
+
+      const before = Date.now();
+      const stopped = await stopLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: false,
+        stopTimeoutMs: 2000,
+      }, db);
+      const elapsedMs = Date.now() - before;
+
+      expect(elapsedMs).toBeLessThan(400);
+      expect(stopped.server.status).toBe("stopping");
+      expect(stopped.server.metadata.pid).toBe(pid);
+      expect(readFileSync(join(dir, "term.txt"), "utf-8")).toBe("term");
+      expect(await waitForPidExit(pid!, 2000)).toBe(true);
+      expect(readFileSync(join(dir, "graceful.txt"), "utf-8")).toBe("graceful");
+      pid = undefined;
+    } finally {
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not spawn a replacement when restart cannot stop the old process without force", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let pid: number | undefined;
+
+    try {
+      writeFileSync(
+        join(dir, "server.js"),
+        `
+const { appendFileSync } = require("node:fs");
+const { join } = require("node:path");
+const http = require("node:http");
+const server = http.createServer((_req, res) => res.end("ok"));
+appendFileSync(join(process.cwd(), "pids.txt"), String(process.pid) + "\\n");
+server.listen(Number(process.env.PORT), "127.0.0.1");
+process.on("SIGTERM", () => {});
+`,
+      );
+
+      const server = createServer({
+        name: "restart-stubborn-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "bun run server.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 8000,
+      }, db);
+      pid = started.pid;
+
+      await expect(restartLocalServer(server.id, {
+        agentId: "agent-1",
+        stopTimeoutMs: 250,
+        readyTimeoutMs: 1000,
+      }, db)).rejects.toThrow("did not stop");
+
+      const pids = readFileSync(join(dir, "pids.txt"), "utf-8").trim().split("\n");
+      expect(pids).toEqual([String(pid)]);
+      expect(isPidRunning(pid!)).toBe(true);
+      const refreshed = getServer(server.id, db)!;
+      expect(refreshed.metadata.pid).toBe(pid);
+    } finally {
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for a forced restart kill before starting the replacement", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let pid: number | undefined;
+
+    try {
+      writeFileSync(
+        join(dir, "server.js"),
+        `
+const { appendFileSync } = require("node:fs");
+const { join } = require("node:path");
+const http = require("node:http");
+const server = http.createServer((_req, res) => res.end("ok"));
+appendFileSync(join(process.cwd(), "pids.txt"), String(process.pid) + "\\n");
+server.listen(Number(process.env.PORT), "127.0.0.1");
+process.on("SIGTERM", () => {});
+`,
+      );
+
+      const server = createServer({
+        name: "restart-force-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "bun run server.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 8000,
+      }, db);
+      const oldPid = started.pid!;
+      pid = oldPid;
+
+      const restarted = await restartLocalServer(server.id, {
+        agentId: "agent-1",
+        stopTimeoutMs: 250,
+        readyTimeoutMs: 8000,
+        force: true,
+      }, db);
+      pid = restarted.pid;
+
+      expect(restarted.ready).toBe(true);
+      expect(restarted.pid).not.toBe(oldPid);
+      expect(await waitForPidExit(oldPid, 1000)).toBe(true);
+      const pids = readFileSync(join(dir, "pids.txt"), "utf-8").trim().split("\n");
+      expect(pids).toEqual([String(oldPid), String(restarted.pid)]);
+    } finally {
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });

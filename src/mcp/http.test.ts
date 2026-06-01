@@ -208,6 +208,18 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
       expect(init.isError).not.toBe(true);
       expect(resultJson(init).server.slug).toBe("mcp-app");
 
+      const duplicateInit = await client.callTool({
+        name: "init_local_server",
+        arguments: {
+          name: "mcp-app",
+          path: appDir,
+          command: "bun run other-server.js",
+          port,
+        },
+      });
+      expect(duplicateInit.isError).toBe(true);
+      expect(resultText(duplicateInit)).toContain("Pass force: true");
+
       const start = await client.callTool({
         name: "start_local_server",
         arguments: {

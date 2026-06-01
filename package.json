@@ -1,6 +1,6 @@
 {
   "name": "@hasna/servers",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Server management for AI coding agents — CLI + MCP server",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/tui/dashboard.tsx --outdir dist/tui --target bun --external ink --external react --external chalk && tsc --emitDeclarationOnly --outDir dist",
+    "build": "rm -rf dist && bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/tui/dashboard.tsx --outdir dist/tui --target bun --external ink --external react --external chalk && tsc --emitDeclarationOnly --outDir dist -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.ts",
