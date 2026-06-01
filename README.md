@@ -43,6 +43,29 @@ servers webhook:add --url "https://hooks.example.com/notify" --events "server.st
 servers webhooks:logs
 ```
 
+### Local App Server Lifecycle
+
+Agents should use the lifecycle commands for long-running dev/app servers instead of starting processes directly. The commands create operations, write traces, claim a `server-runtime` lock, wait for readiness, and record PID/log metadata.
+
+```bash
+# Detect or register the current repo's app server
+servers servers:init --name platform-alumia --path . --command "bun run dev --host 0.0.0.0" --port 7010
+
+# Start and wait for readiness
+servers servers:start platform-alumia --agent diocletian --reason "verify billing flow"
+
+# Inspect current process/readiness state
+servers servers:status platform-alumia --refresh
+servers servers:debug platform-alumia
+servers servers:logs platform-alumia --lines 80
+
+# Restart or stop safely
+servers servers:restart platform-alumia --agent diocletian --reason "env changed"
+servers servers:stop platform-alumia --agent diocletian --reason "done testing"
+```
+
+For apps that need to be reachable from other machines, make the app command bind to `0.0.0.0` and set the managed port. `servers` records the local health check and exposes computed Tailscale URLs from `tailscale_hostname`/`tailscale_port` metadata.
+
 ## MCP
 
 Run as MCP server with stdio transport (default):
@@ -68,13 +91,30 @@ Endpoints (bound to `127.0.0.1` only):
 - `GET /health` → `{"status":"ok","name":"servers"}`
 - `POST /mcp` — MCP Streamable HTTP endpoint
 
+Lifecycle MCP tools:
+
+- `init_local_server`
+- `start_local_server`
+- `stop_local_server`
+- `restart_local_server`
+- `get_local_server_status`
+
 ## SDK
 
 ```typescript
-import { createServer, getServer, registerAgent, listAgents } from "@hasna/servers";
+import {
+  createServer,
+  getServer,
+  registerAgent,
+  listAgents,
+  startLocalServer,
+  stopLocalServer,
+} from "@hasna/servers";
 
 const server = createServer({ name: "api-server" });
 const agent = registerAgent({ name: "marcus", capabilities: ["review"] });
+await startLocalServer(server.id, { agentId: agent.id, reason: "local verification" });
+await stopLocalServer(server.id, { agentId: agent.id, reason: "verification complete" });
 ```
 
 ## Database

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { parseMcpArgs, isHttpMode, resolveHttpPort } from "./args.js";
+import { getMcpVersion } from "./version.js";
 
 describe("parseMcpArgs", () => {
   it("returns help text for --help", () => {
@@ -17,6 +20,13 @@ describe("parseMcpArgs", () => {
   it("returns null for normal run arguments", () => {
     const parsed = parseMcpArgs([], "0.1.3");
     expect(parsed).toBeNull();
+  });
+});
+
+describe("getMcpVersion", () => {
+  it("reads the package version from the project root", () => {
+    const pkg = JSON.parse(readFileSync(join(resolve(import.meta.dir, "..", ".."), "package.json"), "utf-8"));
+    expect(getMcpVersion()).toBe(pkg.version);
   });
 });
 

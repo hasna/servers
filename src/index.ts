@@ -114,3 +114,20 @@ export {
   updateProject,
   deleteProject,
 } from "./db/projects.js";
+
+export {
+  detectProjectServerConfig,
+  displayNameForServerConfig,
+  getLocalServerSnapshot,
+  startLocalServer,
+  stopLocalServer,
+  restartLocalServer,
+} from "./runtime/local-server.js";
+
+export type {
+  DetectedProjectServerConfig,
+  DetectProjectServerOptions,
+  LocalLifecycleOptions,
+  LocalLifecycleResult,
+  LocalServerSnapshot,
+} from "./runtime/local-server.js";

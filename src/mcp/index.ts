@@ -1,25 +1,13 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 
 import { parseMcpArgs, isHttpMode, resolveHttpPort } from "./args.js";
 import { buildServer, createMcpServer } from "./build-server.js";
 import { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT, MCP_HTTP_HOST } from "./http.js";
+import { getMcpVersion } from "./version.js";
 
 export { buildServer } from "./build-server.js";
 export { startMcpHttpServer, DEFAULT_MCP_HTTP_PORT, MCP_HTTP_HOST } from "./http.js";
-
-function getMcpVersion(): string {
-  try {
-    const __dir = dirname(fileURLToPath(import.meta.url));
-    const pkgPath = join(__dir, "..", "package.json");
-    return JSON.parse(readFileSync(pkgPath, "utf-8")).version || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
 
 const parsedArgs = parseMcpArgs(process.argv.slice(2), getMcpVersion());
 if (parsedArgs) {

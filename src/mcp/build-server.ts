@@ -1,7 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import { registerServerTools } from "./tools/servers.js";
 import { registerOperationTools } from "./tools/operations.js";
 import { registerAgentTools } from "./tools/agents.js";
@@ -9,18 +6,10 @@ import { registerTraceTools } from "./tools/traces.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { registerProjectTools } from "./tools/projects.js";
 import { registerLockTools } from "./tools/locks.js";
+import { registerLifecycleTools } from "./tools/lifecycle.js";
+import { getMcpVersion } from "./version.js";
 
 let serverInstance: McpServer | null = null;
-
-function getMcpVersion(): string {
-  try {
-    const __dir = dirname(fileURLToPath(import.meta.url));
-    const pkgPath = join(__dir, "..", "package.json");
-    return JSON.parse(readFileSync(pkgPath, "utf-8")).version || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -50,6 +39,7 @@ export function createMcpServer(): McpServer {
   registerWebhookTools(server, toolContext);
   registerProjectTools(server, toolContext);
   registerLockTools(server, toolContext);
+  registerLifecycleTools(server, toolContext);
 
   return server;
 }

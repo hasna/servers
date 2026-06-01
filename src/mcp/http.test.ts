@@ -1,11 +1,55 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "node:http";
 
 import { closeDatabase, getDatabase } from "../db/database.js";
 import { buildServer, createMcpServer, resetServerForTests } from "./build-server.js";
 import { getListeningPort, startMcpHttpServer } from "./http.js";
+
+const cleanupDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of cleanupDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  cleanupDirs.push(dir);
+  return dir;
+}
+
+async function getFreePort(): Promise<number> {
+  return await new Promise((resolvePort, reject) => {
+    const server = createHttpServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Could not allocate port")));
+        return;
+      }
+      const port = address.port;
+      server.close(() => resolvePort(port));
+    });
+  });
+}
+
+function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  const content = result.content as Array<{ type: string; text?: string }> | undefined;
+  const first = content?.[0];
+  return first && first.type === "text" ? (first.text ?? "") : "";
+}
+
+function resultJson(result: Awaited<ReturnType<Client["callTool"]>>): any {
+  return JSON.parse(resultText(result));
+}
 
 describe("buildServer", () => {
   beforeEach(() => {
@@ -37,6 +81,7 @@ describe("buildServer", () => {
       await client.connect(transport);
       const { tools } = await client.listTools();
       expect(tools.some((t) => t.name === "list_servers")).toBe(true);
+      expect(tools.some((t) => t.name === "start_local_server")).toBe(true);
       await client.close();
     } finally {
       await new Promise<void>((resolve, reject) => {
@@ -122,5 +167,91 @@ describe("startMcpHttpServer", () => {
     }
 
     await Promise.all(clients.map((client) => client.close()));
+  });
+
+  it("starts, checks, and stops a local server through MCP tools", async () => {
+    const appDir = makeTempDir("servers-mcp-app-");
+    const port = await getFreePort();
+    let pid: number | undefined;
+
+    writeFileSync(
+      join(appDir, "server.js"),
+      `
+const http = require("node:http");
+const server = http.createServer((_req, res) => res.end("ok"));
+server.listen(Number(process.env.PORT), "127.0.0.1", () => console.log("ready"));
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`,
+    );
+
+    httpServer = await startMcpHttpServer({
+      port: 0,
+      healthName: "servers",
+      createServer: createMcpServer,
+    });
+    const mcpPort = getListeningPort(httpServer);
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${mcpPort}/mcp`));
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(transport);
+
+    try {
+      const init = await client.callTool({
+        name: "init_local_server",
+        arguments: {
+          name: "mcp-app",
+          path: appDir,
+          command: "bun run server.js",
+          port,
+          env: { PORT: String(port) },
+        },
+      });
+      expect(init.isError).not.toBe(true);
+      expect(resultJson(init).server.slug).toBe("mcp-app");
+
+      const start = await client.callTool({
+        name: "start_local_server",
+        arguments: {
+          id_or_slug: "mcp-app",
+          agent_id: "mcp-test-agent",
+          reason: "mcp regression",
+          timeout_ms: 8000,
+        },
+      });
+      expect(start.isError).not.toBe(true);
+      const started = resultJson(start);
+      pid = started.pid;
+      expect(started.ready).toBe(true);
+      expect(started.server.status).toBe("online");
+
+      const status = await client.callTool({
+        name: "get_local_server_status",
+        arguments: { id_or_slug: "mcp-app", refresh: true },
+      });
+      expect(status.isError).not.toBe(true);
+      expect(resultJson(status).snapshot.ready).toBe(true);
+
+      const stop = await client.callTool({
+        name: "stop_local_server",
+        arguments: {
+          id_or_slug: "mcp-app",
+          agent_id: "mcp-test-agent",
+          stop_timeout_ms: 8000,
+        },
+      });
+      expect(stop.isError).not.toBe(true);
+      pid = undefined;
+      expect(resultJson(stop).server.status).toBe("offline");
+    } finally {
+      await client.close();
+      if (pid) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    }
   });
 });

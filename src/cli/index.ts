@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { existsSync } from "fs";
 import chalk from "chalk";
@@ -10,6 +10,7 @@ import {
   closeDatabase,
   resolvePartialId,
   LOCK_EXPIRY_MINUTES,
+  now,
 } from "../db/database.js";
 import { ensureSchema } from "../db/schema.js";
 import {
@@ -63,6 +64,14 @@ import {
   dispatchWebhook,
 } from "../db/webhooks.js";
 import { getTailscaleUrl } from "../utils/tailscale.js";
+import {
+  detectProjectServerConfig,
+  displayNameForServerConfig,
+  getLocalServerSnapshot,
+  restartLocalServer,
+  startLocalServer,
+  stopLocalServer,
+} from "../runtime/local-server.js";
 import type { Server, UpdateServerInput } from "../types/index.js";
 
 function getVersion(): string {
@@ -152,6 +161,74 @@ function serverWithComputedFields(server: Server): Server & { tailscale_url: str
   return {
     ...server,
     tailscale_url: getTailscaleUrl(server),
+  };
+}
+
+function collectValue(value: string, previous: string[]): string[] {
+  previous.push(value);
+  return previous;
+}
+
+function parseIntegerOption(value: string | undefined, optionName: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) {
+    console.error(chalk.red(`${optionName} must be an integer`));
+    process.exit(1);
+  }
+  return parsed;
+}
+
+function parseEnvOptions(values?: string[]): Record<string, string> | undefined {
+  if (!values || values.length === 0) return undefined;
+  const env: Record<string, string> = {};
+  for (const value of values) {
+    const index = value.indexOf("=");
+    if (index <= 0) {
+      console.error(chalk.red(`--env must use KEY=VALUE syntax: ${value}`));
+      process.exit(1);
+    }
+    const key = value.slice(0, index);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      console.error(chalk.red(`Invalid environment variable name: ${key}`));
+      process.exit(1);
+    }
+    env[key] = value.slice(index + 1);
+  }
+  return env;
+}
+
+function resolveServerOrExit(idOrSlug: string, db: ReturnType<typeof initDb>): Server {
+  let server = getServer(idOrSlug, db);
+  if (!server) server = getServerBySlug(idOrSlug, db);
+  if (!server) {
+    const resolved = resolvePartialId(db, "servers", idOrSlug);
+    if (resolved) server = getServer(resolved, db);
+  }
+  if (!server) {
+    console.error(chalk.red(`Server not found: ${idOrSlug}`));
+    process.exit(1);
+  }
+  return server;
+}
+
+function lifecycleOptions(opts: Record<string, any>) {
+  return {
+    agentId: opts.agent,
+    sessionId: opts.session,
+    reason: opts.reason,
+    command: opts.command,
+    cwd: opts.cwd,
+    port: parseIntegerOption(opts.port, "--port"),
+    healthUrl: opts.healthUrl,
+    env: parseEnvOptions(opts.env),
+    wait: opts.wait,
+    waitForLock: Boolean(opts.waitLock),
+    lockTimeoutMs: parseIntegerOption(opts.lockTimeout, "--lock-timeout"),
+    readyTimeoutMs: parseIntegerOption(opts.timeout, "--timeout"),
+    stopTimeoutMs: parseIntegerOption(opts.stopTimeout || opts.timeout, opts.stopTimeout ? "--stop-timeout" : "--timeout"),
+    logFile: opts.logFile,
+    force: opts.force,
   };
 }
 
@@ -874,57 +951,345 @@ program
     closeDatabase();
   });
 
-// ── Server: restart / stop ───────────────────────────────────────────────────
+// ── Local lifecycle ──────────────────────────────────────────────────────────
+
+program
+  .command("servers:init")
+  .alias("server:init")
+  .description("Detect and register a local app server for the current project")
+  .option("-n, --name <name>", "Server name (default: current folder)")
+  .option("--path <path>", "Project path (default: current git root or cwd)")
+  .option("--project-name <name>", "Project registry name")
+  .option("--description <desc>", "Server description")
+  .option("--command <cmd>", "Explicit start command instead of auto-detection")
+  .option("--port <port>", "Expected local port")
+  .option("--health-url <url>", "Readiness URL")
+  .option("--env <pair>", "Environment variable KEY=VALUE", collectValue, [])
+  .option("--log-file <path>", "Log file path")
+  .option("--force", "Update an existing server with the same slug")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const db = initDb(opts);
+    const gitRoot = findNearestGitRoot(process.cwd());
+    const projectPath = resolve(opts.path || gitRoot || process.cwd());
+    const name = opts.name || displayNameForServerConfig(projectPath);
+    const projectName = opts.projectName || name;
+    const port = parseIntegerOption(opts.port, "--port");
+    const env = parseEnvOptions(opts.env);
+    const detected = opts.command
+      ? {
+        command: opts.command as string,
+        cwd: projectPath,
+        port,
+        healthUrl: opts.healthUrl || defaultLifecycleHealthUrl(port),
+        metadata: { detected_from: "explicit" },
+      }
+      : detectProjectServerConfig(projectPath, { port, healthUrl: opts.healthUrl });
+
+    let project = getProjectByPath(projectPath, db);
+    if (!project) {
+      project = createProject({ name: projectName, path: projectPath, description: opts.description }, db);
+      await emitWebhook("project.created", { project_id: project.id, project }, db);
+    }
+
+    const metadata: Record<string, unknown> = {
+      ...detected.metadata,
+      start_command: detected.command,
+      cwd: detected.cwd,
+      port: detected.port,
+      health_url: detected.healthUrl,
+    };
+    if (env) metadata.env = env;
+    if (opts.logFile) metadata.log_file = resolve(opts.logFile);
+
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 63);
+    const existing = getServerBySlug(slug, db);
+    let server: Server;
+    if (existing) {
+      if (!opts.force) {
+        console.error(chalk.red(`Server already exists: ${existing.slug}. Use --force to update it.`));
+        process.exit(1);
+      }
+      server = updateServer(existing.id, {
+        name,
+        path: projectPath,
+        description: opts.description ?? existing.description,
+        project_id: project.id,
+        metadata: { ...existing.metadata, ...metadata },
+      }, db);
+      await emitWebhook("server.updated", { server_id: server.id, project_id: server.project_id, server }, db);
+    } else {
+      server = createServer({
+        name,
+        slug,
+        path: projectPath,
+        description: opts.description,
+        status: "offline",
+        project_id: project.id,
+        metadata,
+      }, db);
+      await emitWebhook("server.created", { server_id: server.id, project_id: server.project_id, server }, db);
+    }
+
+    const output = { project, server: serverWithComputedFields(server), command: detected.command, next: `servers servers:start ${server.slug} --agent <name> --reason <why>` };
+    if (opts.json || opts.format === "json") {
+      console.log(JSON.stringify(output, null, 2));
+    } else {
+      console.log(chalk.green(`${existing ? "Updated" : "Registered"} server: ${server.name} (${server.slug})`));
+      console.log(`  Project:    ${project.path}`);
+      console.log(`  Command:    ${detected.command}`);
+      console.log(`  CWD:        ${detected.cwd}`);
+      console.log(`  Health:     ${detected.healthUrl || "-"}`);
+      console.log(`  Next:       ${output.next}`);
+    }
+    closeDatabase();
+  });
+
+function defaultLifecycleHealthUrl(port: number | undefined): string | undefined {
+  return port ? `http://127.0.0.1:${port}` : undefined;
+}
+
+program
+  .command("servers:start")
+  .alias("server:start")
+  .description("Safely start a configured local app server and wait for readiness")
+  .argument("<id-or-slug>", "Server ID, partial ID, or slug")
+  .option("--agent <id>", "Agent ID/name requesting the lifecycle lock")
+  .option("--session <id>", "Session ID")
+  .option("--reason <text>", "Why the server is being started")
+  .option("--command <cmd>", "Override configured start command")
+  .option("--cwd <path>", "Override working directory")
+  .option("--port <port>", "Expected local port")
+  .option("--health-url <url>", "Readiness URL")
+  .option("--env <pair>", "Environment variable KEY=VALUE", collectValue, [])
+  .option("--log-file <path>", "Log file path")
+  .option("--timeout <ms>", "Readiness timeout in ms")
+  .option("--lock-timeout <ms>", "How long to wait for another lifecycle lock")
+  .option("--wait-lock", "Wait for another agent's lifecycle lock")
+  .option("--no-wait", "Do not wait for readiness")
+  .option("--force", "Start even if the configured health check is already ready")
+  .option("--json", "Output as JSON")
+  .action(async (idOrSlug, opts) => {
+    const db = initDb(opts);
+    try {
+      const result = await startLocalServer(idOrSlug, lifecycleOptions(opts), db);
+      await emitWebhook("server.started", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
+      if (opts.json || opts.format === "json") {
+        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+      } else {
+        console.log(chalk.green(`Started: ${result.server.name} (${result.server.slug})`));
+        console.log(`  PID:        ${result.pid || result.snapshot.pid || "-"}`);
+        console.log(`  Ready:      ${result.ready ? "yes" : "not yet"}`);
+        console.log(`  Health:     ${result.snapshot.healthUrl || "-"}`);
+        console.log(`  Logs:       ${result.snapshot.logFile || "-"}`);
+        console.log(`  Operation:  ${result.operation.id.slice(0, 8)}`);
+      }
+    } catch (e: any) {
+      console.error(chalk.red(e.message));
+      process.exit(1);
+    } finally {
+      closeDatabase();
+    }
+  });
 
 program
   .command("servers:restart")
   .alias("server:restart")
-  .description("Create a restart operation + trace for a server")
+  .description("Safely restart a configured local app server with a lifecycle lock")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
-  .option("--agent <id>", "Agent ID")
+  .option("--agent <id>", "Agent ID/name requesting the lifecycle lock")
   .option("--session <id>", "Session ID")
+  .option("--reason <text>", "Why the server is being restarted")
+  .option("--command <cmd>", "Override configured start command")
+  .option("--cwd <path>", "Override working directory")
+  .option("--port <port>", "Expected local port")
+  .option("--health-url <url>", "Readiness URL")
+  .option("--env <pair>", "Environment variable KEY=VALUE", collectValue, [])
+  .option("--log-file <path>", "Log file path")
+  .option("--timeout <ms>", "Readiness timeout in ms")
+  .option("--stop-timeout <ms>", "Stop timeout in ms")
+  .option("--lock-timeout <ms>", "How long to wait for another lifecycle lock")
+  .option("--wait-lock", "Wait for another agent's lifecycle lock")
+  .option("--no-wait", "Do not wait for readiness")
+  .option("--force", "Send SIGKILL if graceful stop times out")
+  .option("--json", "Output as JSON")
   .action(async (idOrSlug, opts) => {
     const db = initDb(opts);
-    let server = getServer(idOrSlug, db);
-    if (!server) server = getServerBySlug(idOrSlug, db);
-    if (!server) {
-      const resolved = resolvePartialId(db, "servers", idOrSlug);
-      if (resolved) server = getServer(resolved, db);
-    }
-    if (!server) {
-      console.error(chalk.red(`Server not found: ${idOrSlug}`));
+    try {
+      const result = await restartLocalServer(idOrSlug, lifecycleOptions(opts), db);
+      await emitWebhook("server.restarted", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
+      if (opts.json || opts.format === "json") {
+        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+      } else {
+        console.log(chalk.green(`Restarted: ${result.server.name} (${result.server.slug})`));
+        console.log(`  PID:        ${result.pid || result.snapshot.pid || "-"}`);
+        console.log(`  Ready:      ${result.ready ? "yes" : "not yet"}`);
+        console.log(`  Health:     ${result.snapshot.healthUrl || "-"}`);
+        console.log(`  Logs:       ${result.snapshot.logFile || "-"}`);
+        console.log(`  Operation:  ${result.operation.id.slice(0, 8)}`);
+      }
+    } catch (e: any) {
+      console.error(chalk.red(e.message));
       process.exit(1);
+    } finally {
+      closeDatabase();
     }
-    const op = createOperation({ server_id: server.id, operation_type: "restart", agent_id: opts.agent, session_id: opts.session }, db);
-    const trace = createTrace({ server_id: server.id, operation_id: op.id, agent_id: opts.agent, event: "server.restart" }, db);
-    await emitWebhook("server.restart", { server_id: server.id, project_id: server.project_id, operation_id: op.id, trace_id: trace.id, agent_id: opts.agent, server, operation: op, trace }, db);
-    console.log(chalk.green(`Restart: ${server.name} — operation ${op.id.slice(0, 8)} trace ${trace.id.slice(0, 8)}`));
-    closeDatabase();
   });
 
 program
   .command("servers:stop")
   .alias("server:stop")
-  .description("Create a stop operation + trace for a server")
+  .description("Safely stop a configured local app server")
   .argument("<id-or-slug>", "Server ID, partial ID, or slug")
-  .option("--agent <id>", "Agent ID")
+  .option("--agent <id>", "Agent ID/name requesting the lifecycle lock")
   .option("--session <id>", "Session ID")
+  .option("--reason <text>", "Why the server is being stopped")
+  .option("--timeout <ms>", "Stop timeout in ms")
+  .option("--stop-timeout <ms>", "Stop timeout in ms")
+  .option("--lock-timeout <ms>", "How long to wait for another lifecycle lock")
+  .option("--wait-lock", "Wait for another agent's lifecycle lock")
+  .option("--no-wait", "Do not wait for process exit")
+  .option("--force", "Send SIGKILL if graceful stop times out")
+  .option("--json", "Output as JSON")
   .action(async (idOrSlug, opts) => {
     const db = initDb(opts);
-    let server = getServer(idOrSlug, db);
-    if (!server) server = getServerBySlug(idOrSlug, db);
-    if (!server) {
-      const resolved = resolvePartialId(db, "servers", idOrSlug);
-      if (resolved) server = getServer(resolved, db);
+    try {
+      const result = await stopLocalServer(idOrSlug, lifecycleOptions(opts), db);
+      await emitWebhook("server.stopped", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
+      if (opts.json || opts.format === "json") {
+        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+      } else {
+        console.log(chalk.green(`Stopped: ${result.server.name} (${result.server.slug})`));
+        console.log(`  Operation:  ${result.operation.id.slice(0, 8)}`);
+      }
+    } catch (e: any) {
+      console.error(chalk.red(e.message));
+      process.exit(1);
+    } finally {
+      closeDatabase();
     }
-    if (!server) {
-      console.error(chalk.red(`Server not found: ${idOrSlug}`));
+  });
+
+program
+  .command("servers:status")
+  .alias("server:status")
+  .description("Check local process/readiness status for a server")
+  .argument("<id-or-slug>", "Server ID, partial ID, or slug")
+  .option("--refresh", "Write observed status and heartbeat back to the registry")
+  .option("--timeout <ms>", "Health-check timeout in ms")
+  .option("--json", "Output as JSON")
+  .action(async (idOrSlug, opts) => {
+    const db = initDb(opts);
+    const server = resolveServerOrExit(idOrSlug, db);
+    const snapshot = await getLocalServerSnapshot(server, { timeoutMs: parseIntegerOption(opts.timeout, "--timeout") });
+    let updated = server;
+    if (opts.refresh) {
+      updated = updateServer(server.id, {
+        status: snapshot.status,
+        last_heartbeat: snapshot.ready ? now() : undefined,
+      }, db);
+      await emitWebhook("server.status", { server_id: updated.id, project_id: updated.project_id, server: updated, snapshot }, db);
+    }
+    if (opts.json || opts.format === "json") {
+      console.log(JSON.stringify({ server: serverWithComputedFields(updated), snapshot }, null, 2));
+    } else {
+      const color = snapshot.ready ? chalk.green : snapshot.running ? chalk.yellow : chalk.red;
+      console.log(color(`${updated.name}: ${snapshot.status}`));
+      console.log(`  PID:        ${snapshot.pid || "-"}`);
+      console.log(`  Running:    ${snapshot.running ? "yes" : "no"}`);
+      console.log(`  Ready:      ${snapshot.ready ? "yes" : "no"}`);
+      console.log(`  Health:     ${snapshot.healthUrl || "-"}`);
+      console.log(`  Logs:       ${snapshot.logFile || "-"}`);
+    }
+    closeDatabase();
+  });
+
+program
+  .command("servers:wait")
+  .alias("server:wait")
+  .description("Wait until a server is online/ready or offline/stopped")
+  .argument("<id-or-slug>", "Server ID, partial ID, or slug")
+  .option("--state <state>", "Target state (online/offline)", "online")
+  .option("--timeout <ms>", "Wait timeout in ms", "30000")
+  .option("--json", "Output as JSON")
+  .action(async (idOrSlug, opts) => {
+    const db = initDb(opts);
+    const server = resolveServerOrExit(idOrSlug, db);
+    const timeoutMs = parseIntegerOption(opts.timeout, "--timeout") ?? 30000;
+    const target = opts.state === "offline" ? "offline" : "online";
+    const deadline = Date.now() + timeoutMs;
+    let snapshot = await getLocalServerSnapshot(server);
+    while (Date.now() < deadline) {
+      const reached = target === "online" ? snapshot.ready : !snapshot.running;
+      if (reached) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      snapshot = await getLocalServerSnapshot(getServer(server.id, db) || server);
+    }
+    const reached = target === "online" ? snapshot.ready : !snapshot.running;
+    if (opts.json || opts.format === "json") {
+      console.log(JSON.stringify({ reached, target, snapshot }, null, 2));
+    } else if (reached) {
+      console.log(chalk.green(`Reached ${target}: ${server.name}`));
+    } else {
+      console.error(chalk.red(`Timed out waiting for ${target}: ${server.name}`));
+    }
+    closeDatabase();
+    if (!reached) process.exit(1);
+  });
+
+program
+  .command("servers:logs")
+  .alias("server:logs")
+  .description("Show the managed log file for a server")
+  .argument("<id-or-slug>", "Server ID, partial ID, or slug")
+  .option("-n, --lines <n>", "Number of lines to show", "80")
+  .action((idOrSlug, opts) => {
+    const db = initDb(opts);
+    const server = resolveServerOrExit(idOrSlug, db);
+    const logFile = typeof server.metadata.log_file === "string" ? server.metadata.log_file : null;
+    if (!logFile || !existsSync(logFile)) {
+      console.error(chalk.red(`No log file found for ${server.name}`));
       process.exit(1);
     }
-    const op = createOperation({ server_id: server.id, operation_type: "stop", agent_id: opts.agent, session_id: opts.session }, db);
-    const trace = createTrace({ server_id: server.id, operation_id: op.id, agent_id: opts.agent, event: "server.stop" }, db);
-    await emitWebhook("server.stop", { server_id: server.id, project_id: server.project_id, operation_id: op.id, trace_id: trace.id, agent_id: opts.agent, server, operation: op, trace }, db);
-    console.log(chalk.green(`Stop: ${server.name} — operation ${op.id.slice(0, 8)} trace ${trace.id.slice(0, 8)}`));
+    const lines = readFileSync(logFile, "utf-8").split(/\r?\n/);
+    const count = parseIntegerOption(opts.lines, "--lines") ?? 80;
+    console.log(lines.slice(-count).join("\n"));
+    closeDatabase();
+  });
+
+program
+  .command("servers:debug")
+  .alias("server:debug")
+  .description("Show lifecycle config, lock, operations, traces, and readiness for a server")
+  .argument("<id-or-slug>", "Server ID, partial ID, or slug")
+  .option("--json", "Output as JSON")
+  .action(async (idOrSlug, opts) => {
+    const db = initDb(opts);
+    const server = resolveServerOrExit(idOrSlug, db);
+    const snapshot = await getLocalServerSnapshot(server);
+    const lock = db.query("SELECT * FROM resource_locks WHERE resource_type = ? AND resource_id = ?").get("server-runtime", server.id);
+    const operations = listOperations(server.id, undefined, 10, db);
+    const traces = listTraces(server.id, undefined, 10, db);
+    const output = { server: serverWithComputedFields(server), snapshot, lock, operations, traces };
+    if (opts.json || opts.format === "json") {
+      console.log(JSON.stringify(output, null, 2));
+    } else {
+      console.log(chalk.bold(`Debug: ${server.name} (${server.slug})`));
+      console.log(`  Status:     ${server.status}`);
+      console.log(`  PID:        ${snapshot.pid || "-"}`);
+      console.log(`  Running:    ${snapshot.running ? "yes" : "no"}`);
+      console.log(`  Ready:      ${snapshot.ready ? "yes" : "no"}`);
+      console.log(`  Command:    ${snapshot.command || "-"}`);
+      console.log(`  CWD:        ${snapshot.cwd || "-"}`);
+      console.log(`  Health:     ${snapshot.healthUrl || "-"}`);
+      console.log(`  Lock:       ${lock ? JSON.stringify(lock) : "-"}`);
+      console.log(chalk.bold("\n  Recent operations"));
+      for (const op of operations) console.log(`    ${op.id.slice(0, 8)} ${op.status.padEnd(10)} ${op.operation_type.padEnd(10)} ${op.metadata.reason || ""}`);
+      if (operations.length === 0) console.log("    (none)");
+      console.log(chalk.bold("\n  Recent traces"));
+      for (const trace of traces) console.log(`    ${trace.id.slice(0, 8)} ${trace.event.padEnd(24)} ${trace.agent_id || "-"}`);
+      if (traces.length === 0) console.log("    (none)");
+    }
     closeDatabase();
   });
 
