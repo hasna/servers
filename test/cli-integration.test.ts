@@ -232,6 +232,59 @@ describe("CLI integration tests", () => {
     }
   });
 
+  test("global --format json is honored by servers:get", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      await run(`${CLI} ${dbFlag} server:add -n "Fmt Get Server" --slug fmt-get --hostname 9.9.9.9`);
+      const { stdout } = await run(`${CLI} --format json ${dbFlag} servers:get fmt-get`);
+      const parsed = JSON.parse(stdout);
+      expect(parsed.name).toBe("Fmt Get Server");
+      expect(parsed.slug).toBe("fmt-get");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("global --format json is honored by every read subcommand", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      await run(`${CLI} ${dbFlag} server:add -n "Fmt All Server" --slug fmt-all`);
+      await run(`${CLI} ${dbFlag} agent:register -n "FmtAgent"`);
+      await run(`${CLI} ${dbFlag} operation:add --server fmt-all --type deploy`);
+      await run(`${CLI} ${dbFlag} trace:add --server fmt-all --event "fmt.event"`);
+      await run(`${CLI} ${dbFlag} project:add -n "FmtProject" --path /tmp/fmt-project-path`);
+      await run(`${CLI} ${dbFlag} webhook:add --url https://example.com/fmt --events server.created`);
+
+      // Each of these must emit parseable JSON when the GLOBAL --format json flag is set,
+      // exactly like the per-command --json flag does.
+      const cases: { cmd: string; assert: (parsed: any) => void }[] = [
+        { cmd: `servers`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `servers:get fmt-all`, assert: (p) => expect(p.slug).toBe("fmt-all") },
+        { cmd: `agents`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `operations`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `traces`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `projects`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `webhooks`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `webhooks:logs`, assert: (p) => expect(Array.isArray(p)).toBe(true) },
+        { cmd: `servers:status fmt-all`, assert: (p) => expect(p.server.slug).toBe("fmt-all") },
+        { cmd: `servers:debug fmt-all`, assert: (p) => expect(p.server.slug).toBe("fmt-all") },
+      ];
+
+      for (const { cmd, assert } of cases) {
+        const { stdout } = await run(`${CLI} --format json ${dbFlag} ${cmd}`);
+        let parsed: any;
+        try {
+          parsed = JSON.parse(stdout);
+        } catch {
+          throw new Error(`--format json was ignored by: ${cmd}\nOutput was:\n${stdout}`);
+        }
+        assert(parsed);
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
   test("completion generates for all shells", async () => {
     const shells = ["bash", "zsh", "fish"];
     for (const shell of shells) {

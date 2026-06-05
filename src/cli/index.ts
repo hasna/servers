@@ -112,6 +112,22 @@ function findNearestGitRoot(startDir: string): string | null {
   return null;
 }
 
+/**
+ * Whether the caller asked for JSON output. Honors BOTH the per-command
+ * `--json` flag and the global `--format json` option. The global `--format`
+ * lives on the root program, so it is not merged into a subcommand's own opts
+ * — read it from the program directly.
+ */
+function wantsJson(opts: Record<string, any>): boolean {
+  if (opts?.json) return true;
+  if (opts?.format === "json") return true;
+  try {
+    return program.opts().format === "json";
+  } catch {
+    return false;
+  }
+}
+
 function formatTable(headers: string[], rows: string[][]): string {
   const cols = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i]?.length ?? 0)));
   const pad = cols.map(c => c + 2);
@@ -257,7 +273,7 @@ program
     const ops = listOperations(undefined, undefined, 10, db);
     const traces = listTraces(undefined, undefined, 5, db);
 
-    if (opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify({ servers: servers.map(serverWithComputedFields), agents, operations: ops, traces }, null, 2));
       closeDatabase();
       return;
@@ -309,7 +325,7 @@ program
   .action((opts) => {
     const db = initDb(opts);
     const servers = listServers(opts.project, db);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(servers.map(serverWithComputedFields), null, 2));
     } else {
       const headers = ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL"];
@@ -429,7 +445,7 @@ program
       process.exit(1);
     }
     const output = serverWithComputedFields(server);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(output, null, 2));
     } else {
       console.log(chalk.bold("Server:"));
@@ -539,7 +555,7 @@ program
   .action((opts) => {
     const db = initDb(opts);
     const agents = listAgents(opts.status, db);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(agents, null, 2));
     } else {
       const headers = ["ID", "STATUS", "NAME", "SESSION", "LAST SEEN"];
@@ -643,7 +659,7 @@ program
       if (resolved) serverId = resolved;
     }
     const ops = listOperations(serverId, opts.status, parseInt(opts.limit), db);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(ops, null, 2));
     } else {
       const headers = ["ID", "STATUS", "TYPE", "SERVER", "AGENT", "STARTED"];
@@ -772,7 +788,7 @@ program
     } else {
       traces = listTraces(opts.server, undefined, parseInt(opts.limit), db);
     }
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(traces, null, 2));
     } else {
       const headers = ["ID", "EVENT", "SERVER", "AGENT", "CREATED"];
@@ -831,7 +847,7 @@ program
   .action((opts) => {
     const db = initDb(opts);
     const projects = listProjects(db);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(projects, null, 2));
     } else {
       const headers = ["ID", "NAME", "PATH", "DESCRIPTION"];
@@ -878,7 +894,7 @@ program
   .action((opts) => {
     const db = initDb(opts);
     const webhooks = listWebhooks(db);
-    if (opts.json) {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(webhooks, null, 2));
     } else {
       const headers = ["ID", "STATUS", "URL", "EVENTS"];
@@ -1032,7 +1048,7 @@ program
     }
 
     const output = { project, server: serverWithComputedFields(server), command: detected.command, next: `servers servers:start ${server.slug} --agent <name> --reason <why>` };
-    if (opts.json || opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(output, null, 2));
     } else {
       console.log(chalk.green(`${existing ? "Updated" : "Registered"} server: ${server.name} (${server.slug})`));
@@ -1074,7 +1090,7 @@ program
     try {
       const result = await startLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.started", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
-      if (opts.json || opts.format === "json") {
+      if (wantsJson(opts)) {
         console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
       } else {
         console.log(chalk.green(`Started: ${result.server.name} (${result.server.slug})`));
@@ -1118,7 +1134,7 @@ program
     try {
       const result = await restartLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.restarted", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
-      if (opts.json || opts.format === "json") {
+      if (wantsJson(opts)) {
         console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
       } else {
         console.log(chalk.green(`Restarted: ${result.server.name} (${result.server.slug})`));
@@ -1156,7 +1172,7 @@ program
     try {
       const result = await stopLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.stopped", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
-      if (opts.json || opts.format === "json") {
+      if (wantsJson(opts)) {
         console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
       } else {
         console.log(chalk.green(`Stopped: ${result.server.name} (${result.server.slug})`));
@@ -1190,7 +1206,7 @@ program
       }, db);
       await emitWebhook("server.status", { server_id: updated.id, project_id: updated.project_id, server: updated, snapshot }, db);
     }
-    if (opts.json || opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify({ server: serverWithComputedFields(updated), snapshot }, null, 2));
     } else {
       const color = snapshot.ready ? chalk.green : snapshot.running ? chalk.yellow : chalk.red;
@@ -1226,7 +1242,7 @@ program
       snapshot = await getLocalServerSnapshot(getServer(server.id, db) || server);
     }
     const reached = target === "online" ? snapshot.ready : !snapshot.running;
-    if (opts.json || opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify({ reached, target, snapshot }, null, 2));
     } else if (reached) {
       console.log(chalk.green(`Reached ${target}: ${server.name}`));
@@ -1271,7 +1287,7 @@ program
     const operations = listOperations(server.id, undefined, 10, db);
     const traces = listTraces(server.id, undefined, 10, db);
     const output = { server: serverWithComputedFields(server), snapshot, lock, operations, traces };
-    if (opts.json || opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(output, null, 2));
     } else {
       console.log(chalk.bold(`Debug: ${server.name} (${server.slug})`));
@@ -1416,7 +1432,7 @@ program
   .action((opts) => {
     const db = initDb(opts);
     const deliveries = listDeliveries(opts.webhook, parseInt(opts.limit), db);
-    if (opts.json || opts.format === "json") {
+    if (wantsJson(opts)) {
       console.log(JSON.stringify(deliveries, null, 2));
     } else {
       const headers = ["ID", "WEBHOOK", "STATUS", "ATTEMPT", "TIME"];
