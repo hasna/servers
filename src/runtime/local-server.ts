@@ -23,6 +23,13 @@ import {
   startOperation,
 } from "../db/operations.js";
 import { createTrace } from "../db/traces.js";
+import {
+  discoverServerPids,
+  findListenerPids,
+  isAlive,
+  isGroupAlive,
+  killTree,
+} from "./process-tree.js";
 import type {
   OperationType,
   Server,
@@ -374,6 +381,31 @@ export async function getLocalServerSnapshot(
   };
 }
 
+interface ServerProcessTarget {
+  pid: number | null;
+  port: number | null;
+  command: string | null;
+  cwd: string | null;
+}
+
+/** Build the discovery descriptor used to find and kill a server's process tree. */
+function serverProcessTarget(server: Server, opts: LocalLifecycleOptions = {}): ServerProcessTarget {
+  return {
+    pid: numberValue(server.metadata.pid) ?? null,
+    port:
+      opts.port
+      ?? numberValue(server.metadata.port)
+      ?? numberValue(server.metadata.tailscale_port)
+      ?? null,
+    command:
+      opts.command
+      ?? stringValue(server.metadata.start_command)
+      ?? stringValue(server.metadata.command)
+      ?? null,
+    cwd: opts.cwd ?? stringValue(server.metadata.cwd) ?? server.path ?? null,
+  };
+}
+
 async function waitForReadiness(
   getServerSnapshot: () => Promise<LocalServerSnapshot>,
   timeoutMs: number,
@@ -430,16 +462,18 @@ async function cleanupSpawnedProcessAfterFailure(
   agentId: string | undefined,
   reason: string | undefined,
   timeoutMs: number,
+  config: ResolvedLifecycleConfig,
   db: Database,
 ): Promise<void> {
-  if (isProcessRunning(pid)) {
-    sendProcessSignal(pid, "SIGTERM");
-    const stopped = await waitForStop(pid, timeoutMs);
-    if (!stopped) {
-      sendProcessSignal(pid, "SIGKILL");
-      await waitForStop(pid, 2000);
-    }
-  }
+  // A failed start can also leave escaped worker children behind, so clean up
+  // the whole tree (escalating to SIGKILL), not just the recorded pid.
+  await killTree({
+    pid,
+    port: config.port ?? null,
+    command: config.command,
+    cwd: config.cwd,
+    gracePeriodMs: timeoutMs,
+  });
 
   markServerOfflineAfterRuntimeFailure(serverId, agentId, reason, db);
 }
@@ -630,6 +664,7 @@ export async function startLocalServer(
         agentId,
         opts.reason,
         config.stopTimeoutMs,
+        config,
         db,
       );
     }
@@ -665,40 +700,56 @@ export async function stopLocalServer(
       details: operation.metadata,
     }, db);
 
-    const pid = numberValue(server.metadata.pid) ?? null;
-    let stopped = true;
-    if (isProcessRunning(pid)) {
-      sendProcessSignal(pid!, "SIGTERM");
-      if (opts.wait === false) {
-        const updated = updateServer(server.id, {
-          status: "stopping",
-          metadata: updateRuntimeMetadata(server, {
-            stop_requested_at: now(),
-            stopped_by: agentId,
-            last_reason: opts.reason ?? null,
-          }),
-        }, db);
-        const snapshot = await getLocalServerSnapshot(updated);
-        createTrace({
-          server_id: server.id,
-          operation_id: operation.id,
-          agent_id: agentId,
-          event: "server.stop.signal_sent",
-          details: { pid, wait: false },
-        }, db);
-        const completed = completeOperation(operation.id, db);
-        return { server: updated, operation: completed, snapshot, ready: snapshot.ready, pid: pid ?? undefined };
-      }
+    const target = serverProcessTarget(server, opts);
+    const pid = target.pid;
+    const stopTimeoutMs = opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
 
-      stopped = await waitForStop(pid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
-      if (!stopped && opts.force === true) {
-        sendProcessSignal(pid!, "SIGKILL");
-        stopped = await waitForStop(pid, 2000);
+    // Fire-and-forget mode: signal and return without verifying exit.
+    if (opts.wait === false) {
+      if (isGroupAlive(pid)) sendProcessSignal(pid!, "SIGTERM");
+      for (const survivor of discoverServerPids(target)) {
+        try {
+          process.kill(survivor, "SIGTERM");
+        } catch {}
       }
+      const updated = updateServer(server.id, {
+        status: "stopping",
+        metadata: updateRuntimeMetadata(server, {
+          stop_requested_at: now(),
+          stopped_by: agentId,
+          last_reason: opts.reason ?? null,
+        }),
+      }, db);
+      const snapshot = await getLocalServerSnapshot(updated);
+      createTrace({
+        server_id: server.id,
+        operation_id: operation.id,
+        agent_id: agentId,
+        event: "server.stop.signal_sent",
+        details: { pid, wait: false },
+      }, db);
+      const completed = completeOperation(operation.id, db);
+      return { server: updated, operation: completed, snapshot, ready: snapshot.ready, pid: pid ?? undefined };
     }
 
-    if (!stopped) {
-      throw new Error(`Server ${server.slug} process ${pid} did not stop within ${opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS}ms`);
+    // Verified stop: take the WHOLE tree down (recorded pid + descendants +
+    // port listeners + command/cwd survivors), escalate SIGTERM -> SIGKILL,
+    // and confirm nothing matching the server is still alive or listening.
+    const result = await killTree({
+      pid,
+      port: target.port,
+      command: target.command,
+      cwd: target.cwd,
+      gracePeriodMs: stopTimeoutMs,
+    });
+
+    if (!result.stopped) {
+      const detail = result.portStillListening
+        ? `port ${target.port} is still listening`
+        : `pids still alive: ${result.survivors.join(", ")}`;
+      throw new Error(
+        `Server ${server.slug} did not stop — ${detail} (recorded pid ${pid ?? "-"}). The process tree survived SIGTERM and SIGKILL.`,
+      );
     }
 
     const updated = updateServer(server.id, {
@@ -715,7 +766,7 @@ export async function stopLocalServer(
       operation_id: operation.id,
       agent_id: agentId,
       event: "server.stopped",
-      details: { pid, stopped: true },
+      details: { pid, stopped: true, targeted: result.targeted },
     }, db);
     const completed = completeOperation(operation.id, db);
     return { server: updated, operation: completed, snapshot, ready: snapshot.ready, pid: pid ?? undefined };
@@ -755,18 +806,28 @@ export async function restartLocalServer(
       details: operation.metadata,
     }, db);
 
-    const pid = numberValue(server.metadata.pid) ?? null;
-    if (isProcessRunning(pid)) {
-      sendProcessSignal(pid!, "SIGTERM");
-      const stopped = await waitForStop(pid, opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS);
-      if (!stopped && opts.force === true) {
-        sendProcessSignal(pid!, "SIGKILL");
-        const killed = await waitForStop(pid, 2000);
-        if (!killed) {
-          throw new Error(`Server ${server.slug} process ${pid} did not stop after SIGKILL`);
-        }
-      } else if (!stopped) {
-        throw new Error(`Server ${server.slug} process ${pid} did not stop within ${opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS}ms`);
+    const target = serverProcessTarget(server, opts);
+    const pid = target.pid;
+    const stopTimeoutMs = opts.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+    // Restart keeps the historical contract: only force-kill (SIGKILL) the old
+    // tree when --force is set, so we never replace a process we could not stop
+    // cleanly. The whole-tree discovery is always used so escaped workers and
+    // port holders are stopped, not just the recorded group leader.
+    if (discoverServerPids(target).length > 0 || findListenerPids(target.port).length > 0) {
+      const result = await killTree({
+        pid,
+        port: target.port,
+        command: target.command,
+        cwd: target.cwd,
+        gracePeriodMs: stopTimeoutMs,
+        escalate: opts.force === true,
+      });
+      if (!result.stopped) {
+        const reason = opts.force === true ? "did not stop after SIGKILL" : "did not stop";
+        const detail = result.portStillListening
+          ? `port ${target.port} is still listening`
+          : `pids still alive: ${result.survivors.join(", ")}`;
+        throw new Error(`Server ${server.slug} ${reason} — ${detail} (recorded pid ${pid ?? "-"}).`);
       }
     }
 
@@ -827,6 +888,7 @@ export async function restartLocalServer(
         agentId,
         opts.reason,
         config.stopTimeoutMs,
+        config,
         db,
       );
     } else if (runtimeWasChanged) {

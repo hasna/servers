@@ -366,6 +366,167 @@ process.on("SIGTERM", () => {
     }
   });
 
+  it("kills the entire process tree on stop even when a child escapes the process group", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let childPid: number | undefined;
+
+    try {
+      // wrapper.js spawns a detached grandchild (its OWN process group / session),
+      // like `bunx next dev` spawning a `node next dev` worker that detaches.
+      // The wrapper exits on SIGTERM; the grandchild keeps holding the port and
+      // ignores SIGTERM. A correct stop must still take the whole tree down.
+      writeFileSync(
+        join(dir, "wrapper.js"),
+        `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const port = Number(process.env.PORT);
+const childSrc = [
+  "const http = require('node:http');",
+  "process.on('SIGTERM', () => {});",      // grandchild ignores plain SIGTERM
+  "const s = http.createServer((_q, r) => r.end('ok'));",
+  "s.listen(" + port + ", '127.0.0.1');",
+  "setInterval(() => {}, 1000);",
+].join("\\n");
+const child = spawn(process.execPath, ["-e", childSrc], { stdio: "ignore", detached: true });
+child.unref();
+writeFileSync(join(process.cwd(), "child.txt"), String(child.pid));
+writeFileSync(join(process.cwd(), "wrapper.txt"), String(process.pid));
+process.on("SIGTERM", () => { process.exit(0); }); // wrapper (group leader) dies on SIGTERM
+setInterval(() => {}, 1000);
+`,
+      );
+
+      const server = createServer({
+        name: "escaping-child-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          // No leading exec: bash is the group leader, node wrapper a child,
+          // and the grandchild detaches into its own group.
+          start_command: "node wrapper.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 8000,
+      }, db);
+      expect(started.ready).toBe(true);
+
+      childPid = Number.parseInt(readFileSync(join(dir, "child.txt"), "utf-8"), 10);
+      expect(isPidRunning(childPid)).toBe(true);
+
+      const stopped = await stopLocalServer(server.id, {
+        agentId: "agent-1",
+        reason: "regression: escaping child must die",
+        wait: true,
+        stopTimeoutMs: 4000,
+      }, db);
+
+      // The whole tree must be gone, and the server must be reported stopped.
+      expect(await waitForPidExit(childPid, 4000)).toBe(true);
+      expect(isPidRunning(childPid)).toBe(false);
+      expect(stopped.server.status).toBe("offline");
+      expect(stopped.operation.status).toBe("completed");
+      expect(stopped.server.metadata.pid).toBeUndefined();
+      // Port must no longer be held by the dead tree.
+      expect(stopped.snapshot.ready).toBe(false);
+      childPid = undefined;
+    } finally {
+      if (childPid) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("force-kills a SIGTERM-ignoring tree by default and verifies the port is freed", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let childPid: number | undefined;
+
+    try {
+      // A wrapper that detaches a SIGTERM-ignoring listener into its own group.
+      // The default stop must escalate SIGTERM -> SIGKILL (no --force required)
+      // and confirm the port is no longer held before reporting success.
+      writeFileSync(
+        join(dir, "wrapper.js"),
+        `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const port = Number(process.env.PORT);
+const childSrc = [
+  "const http=require('node:http');",
+  "process.on('SIGTERM',()=>{});", // child ignores SIGTERM, only SIGKILL stops it
+  "const s=http.createServer((_q,r)=>r.end('ok'));",
+  "s.listen(" + port + ",'127.0.0.1');",
+  "setInterval(()=>{},1000);",
+].join("\\n");
+const child = spawn(process.execPath, ["-e", childSrc], { stdio: "ignore", detached: true });
+child.unref();
+writeFileSync(join(process.cwd(), "child.txt"), String(child.pid));
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`,
+      );
+
+      const server = createServer({
+        name: "sigterm-ignoring-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "node wrapper.js",
+          cwd: dir,
+          port,
+          health_url: `http://127.0.0.1:${port}`,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        readyTimeoutMs: 8000,
+      }, db);
+      expect(started.ready).toBe(true);
+      childPid = Number.parseInt(readFileSync(join(dir, "child.txt"), "utf-8"), 10);
+      expect(isPidRunning(childPid)).toBe(true);
+
+      // No --force flag: default stop must still SIGKILL after the grace period.
+      const stopped = await stopLocalServer(server.id, {
+        agentId: "agent-1",
+        wait: true,
+        stopTimeoutMs: 500,
+      }, db);
+
+      expect(stopped.operation.status).toBe("completed");
+      expect(stopped.server.status).toBe("offline");
+      expect(await waitForPidExit(childPid, 4000)).toBe(true);
+      expect(isPidRunning(childPid)).toBe(false);
+      childPid = undefined;
+    } finally {
+      if (childPid) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not spawn a replacement when restart cannot stop the old process without force", async () => {
     const dir = makeTempDir();
     const port = await getFreePort();
