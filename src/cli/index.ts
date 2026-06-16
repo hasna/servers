@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
+import { registerEventsCommands } from "@hasna/events/commander";
 import { readFileSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -262,6 +263,7 @@ program
     const opts = thisCmd.optsWithGlobals();
     if (opts.db) process.env["SERVERS_DB_PATH"] = opts.db;
   });
+registerEventsCommands(program, { source: "servers", webhooksCommandName: "event-webhooks" });
 
 // ── Dashboard (default) ──────────────────────────────────────────────────────
 

@@ -29,6 +29,20 @@ describe("CLI integration tests", () => {
     const { stdout } = await run(`${CLI} --version`);
     expect(stdout.trim()).toBe(VERSION);
   });
+
+  test("help exposes shared events commands without replacing native webhooks", async () => {
+    const eventsDir = mkdtempSync(join(tmpdir(), "servers-events-"));
+    try {
+      const { stdout } = await execAsync(`${CLI} --help`, { env: { ...process.env, HASNA_EVENTS_DIR: eventsDir } });
+
+      expect(stdout).toContain("events");
+      expect(stdout).toContain("event-webhooks");
+      expect(stdout).toContain("webhooks");
+    } finally {
+      rmSync(eventsDir, { recursive: true, force: true });
+    }
+  });
+
   test("dashboard shows without errors", async () => {
     const { dbFlag, cleanup } = withTmpDb();
     try {
