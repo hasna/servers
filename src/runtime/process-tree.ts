@@ -63,19 +63,17 @@ function isZombie(pid: number): boolean {
 
 function groupHasLiveMember(pgid: number): boolean {
   try {
-    const out = execFileSync("ps", ["-eo", "pgid=,stat="], {
+    const out = execFileSync("ps", ["-o", "stat=", "-g", String(pgid)], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
       timeout: 1000,
     });
     let sawGroup = false;
     for (const line of out.split(/\r?\n/)) {
-      const m = line.match(/^\s*(\d+)\s+(\S+)/);
-      if (!m) continue;
-      const processGroup = Number.parseInt(m[1]!, 10);
-      if (processGroup !== pgid) continue;
+      const stat = line.trim();
+      if (!stat) continue;
       sawGroup = true;
-      if (!m[2]!.startsWith("Z")) return true;
+      if (!stat.startsWith("Z")) return true;
     }
     return sawGroup ? false : true;
   } catch {
