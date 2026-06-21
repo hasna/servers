@@ -130,6 +130,49 @@ function wantsJson(opts: Record<string, any>): boolean {
   }
 }
 
+const REDACTED_VALUE = "[redacted]";
+const SENSITIVE_KEY_PATTERN = /(?:^|[_-])(secret|token|key|password|passwd|credential|authorization|auth|cookie|session|private)(?:$|[_-])/i;
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERN.test(key) || /api[_-]?key/i.test(key) || /access[_-]?token/i.test(key) || /refresh[_-]?token/i.test(key);
+}
+
+function redactSensitiveString(value: string): string {
+  return value
+    .replace(/\b([A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Za-z0-9_]*\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s;&|]+)/gi, "$1[redacted]")
+    .replace(/([?&][^=\s&]*(?:secret|token|key|password|passwd|credential|auth)[^=\s&]*=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[redacted]");
+}
+
+function redactSensitiveFields<T>(value: T): T {
+  if (typeof value === "string") {
+    return redactSensitiveString(value) as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveFields(item)) as T;
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const redacted: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = isSensitiveKey(key) && child != null ? REDACTED_VALUE : redactSensitiveFields(child);
+  }
+
+  return redacted as T;
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(redactSensitiveFields(value), null, 2));
+}
+
+function stringifyForDisplay(value: unknown): string {
+  return JSON.stringify(redactSensitiveFields(value));
+}
+
 function formatTable(headers: string[], rows: string[][]): string {
   const cols = headers.map((h, i) => Math.max(h.length, ...rows.map(r => r[i]?.length ?? 0)));
   const pad = cols.map(c => c + 2);
@@ -281,7 +324,7 @@ program
     const traces = listTraces(undefined, undefined, 5, db);
 
     if (wantsJson(opts)) {
-      console.log(JSON.stringify({ servers: servers.map(serverWithComputedFields), agents, operations: ops, traces }, null, 2));
+      printJson({ servers: servers.map(serverWithComputedFields), agents, operations: ops, traces });
       closeDatabase();
       return;
     }
@@ -333,7 +376,7 @@ program
     const db = initDb(opts);
     const servers = listServers(opts.project, db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(servers.map(serverWithComputedFields), null, 2));
+      printJson(servers.map(serverWithComputedFields));
     } else {
       const headers = ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL"];
       const rows = servers.map(s => [
@@ -453,7 +496,7 @@ program
     }
     const output = serverWithComputedFields(server);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(output, null, 2));
+      printJson(output);
     } else {
       console.log(chalk.bold("Server:"));
       console.log(`  ID:          ${server.id}`);
@@ -563,7 +606,7 @@ program
     const db = initDb(opts);
     const agents = listAgents(opts.status, db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(agents, null, 2));
+      printJson(agents);
     } else {
       const headers = ["ID", "STATUS", "NAME", "SESSION", "LAST SEEN"];
       const rows = agents.map(a => [
@@ -667,7 +710,7 @@ program
     }
     const ops = listOperations(serverId, opts.status, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(ops, null, 2));
+      printJson(ops);
     } else {
       const headers = ["ID", "STATUS", "TYPE", "SERVER", "AGENT", "STARTED"];
       const rows = ops.map(o => [
@@ -796,7 +839,7 @@ program
       traces = listTraces(opts.server, undefined, parsePositiveIntegerOption(opts.limit, "--limit") ?? 100, db);
     }
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(traces, null, 2));
+      printJson(traces);
     } else {
       const headers = ["ID", "EVENT", "SERVER", "AGENT", "CREATED"];
       const rows = traces.map(t => [
@@ -855,7 +898,7 @@ program
     const db = initDb(opts);
     const projects = listProjects(db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(projects, null, 2));
+      printJson(projects);
     } else {
       const headers = ["ID", "NAME", "PATH", "DESCRIPTION"];
       const rows = projects.map(p => [
@@ -902,7 +945,7 @@ program
     const db = initDb(opts);
     const webhooks = listWebhooks(db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(webhooks, null, 2));
+      printJson(webhooks);
     } else {
       const headers = ["ID", "STATUS", "URL", "EVENTS"];
       const rows = webhooks.map(w => [
@@ -1056,7 +1099,7 @@ program
 
     const output = { project, server: serverWithComputedFields(server), command: detected.command, next: `servers servers:start ${server.slug} --agent <name> --reason <why>` };
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(output, null, 2));
+      printJson(output);
     } else {
       console.log(chalk.green(`${existing ? "Updated" : "Registered"} server: ${server.name} (${server.slug})`));
       console.log(`  Project:    ${project.path}`);
@@ -1098,7 +1141,7 @@ program
       const result = await startLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.started", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
       if (wantsJson(opts)) {
-        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+        printJson({ ...result, server: serverWithComputedFields(result.server) });
       } else {
         console.log(chalk.green(`Started: ${result.server.name} (${result.server.slug})`));
         console.log(`  PID:        ${result.pid || result.snapshot.pid || "-"}`);
@@ -1142,7 +1185,7 @@ program
       const result = await restartLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.restarted", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
       if (wantsJson(opts)) {
-        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+        printJson({ ...result, server: serverWithComputedFields(result.server) });
       } else {
         console.log(chalk.green(`Restarted: ${result.server.name} (${result.server.slug})`));
         console.log(`  PID:        ${result.pid || result.snapshot.pid || "-"}`);
@@ -1180,7 +1223,7 @@ program
       const result = await stopLocalServer(idOrSlug, lifecycleOptions(opts), db);
       await emitWebhook("server.stopped", { server_id: result.server.id, project_id: result.server.project_id, operation_id: result.operation.id, agent_id: opts.agent, server: result.server, operation: result.operation, snapshot: result.snapshot }, db);
       if (wantsJson(opts)) {
-        console.log(JSON.stringify({ ...result, server: serverWithComputedFields(result.server) }, null, 2));
+        printJson({ ...result, server: serverWithComputedFields(result.server) });
       } else {
         console.log(chalk.green(`Stopped: ${result.server.name} (${result.server.slug})`));
         console.log(`  Operation:  ${result.operation.id.slice(0, 8)}`);
@@ -1214,7 +1257,7 @@ program
       await emitWebhook("server.status", { server_id: updated.id, project_id: updated.project_id, server: updated, snapshot }, db);
     }
     if (wantsJson(opts)) {
-      console.log(JSON.stringify({ server: serverWithComputedFields(updated), snapshot }, null, 2));
+      printJson({ server: serverWithComputedFields(updated), snapshot });
     } else {
       const color = snapshot.ready ? chalk.green : snapshot.running ? chalk.yellow : chalk.red;
       console.log(color(`${updated.name}: ${snapshot.status}`));
@@ -1250,7 +1293,7 @@ program
     }
     const reached = target === "online" ? snapshot.ready : !snapshot.running;
     if (wantsJson(opts)) {
-      console.log(JSON.stringify({ reached, target, snapshot }, null, 2));
+      printJson({ reached, target, snapshot });
     } else if (reached) {
       console.log(chalk.green(`Reached ${target}: ${server.name}`));
     } else {
@@ -1295,19 +1338,19 @@ program
     const traces = listTraces(server.id, undefined, 10, db);
     const output = { server: serverWithComputedFields(server), snapshot, lock, operations, traces };
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(output, null, 2));
+      printJson(output);
     } else {
       console.log(chalk.bold(`Debug: ${server.name} (${server.slug})`));
       console.log(`  Status:     ${server.status}`);
       console.log(`  PID:        ${snapshot.pid || "-"}`);
       console.log(`  Running:    ${snapshot.running ? "yes" : "no"}`);
       console.log(`  Ready:      ${snapshot.ready ? "yes" : "no"}`);
-      console.log(`  Command:    ${snapshot.command || "-"}`);
+      console.log(`  Command:    ${redactSensitiveFields(snapshot.command) || "-"}`);
       console.log(`  CWD:        ${snapshot.cwd || "-"}`);
       console.log(`  Health:     ${snapshot.healthUrl || "-"}`);
-      console.log(`  Lock:       ${lock ? JSON.stringify(lock) : "-"}`);
+      console.log(`  Lock:       ${lock ? stringifyForDisplay(lock) : "-"}`);
       console.log(chalk.bold("\n  Recent operations"));
-      for (const op of operations) console.log(`    ${op.id.slice(0, 8)} ${op.status.padEnd(10)} ${op.operation_type.padEnd(10)} ${op.metadata.reason || ""}`);
+      for (const op of operations) console.log(`    ${op.id.slice(0, 8)} ${op.status.padEnd(10)} ${op.operation_type.padEnd(10)} ${redactSensitiveFields(op.metadata.reason || "")}`);
       if (operations.length === 0) console.log("    (none)");
       console.log(chalk.bold("\n  Recent traces"));
       for (const trace of traces) console.log(`    ${trace.id.slice(0, 8)} ${trace.event.padEnd(24)} ${trace.agent_id || "-"}`);
@@ -1440,7 +1483,7 @@ program
     const db = initDb(opts);
     const deliveries = listDeliveries(opts.webhook, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
     if (wantsJson(opts)) {
-      console.log(JSON.stringify(deliveries, null, 2));
+      printJson(deliveries);
     } else {
       const headers = ["ID", "WEBHOOK", "STATUS", "ATTEMPT", "TIME"];
       const rows = deliveries.map(d => [

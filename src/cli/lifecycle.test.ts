@@ -58,6 +58,8 @@ describe("servers lifecycle CLI", () => {
     const appDir = makeTempDir("servers-cli-app-");
     const dbPath = join(makeTempDir("servers-cli-db-"), "servers.db");
     const port = await getFreePort();
+    const redactionSentinel = "redaction-sentinel-value";
+    const command = `ANTHROPIC_API_KEY=${redactionSentinel} PORT=${port} bun run server.js`;
     let pid: number | undefined;
 
     writeFileSync(
@@ -77,17 +79,21 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
       "--path",
       appDir,
       "--command",
-      "bun run server.js",
+      command,
       "--port",
       String(port),
       "--env",
       `PORT=${port}`,
+      "--env",
+      `ANTHROPIC_API_KEY=${redactionSentinel}`,
       "--json",
     ], { dbPath });
     expect(init.exitCode).toBe(0);
     const initJson = JSON.parse(init.stdout);
+    expect(init.stdout).not.toContain(redactionSentinel);
     expect(initJson.server.slug).toBe("cli-app");
-    expect(initJson.command).toBe("bun run server.js");
+    expect(initJson.command).toContain("ANTHROPIC_API_KEY=[redacted]");
+    expect(initJson.server.metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
 
     try {
       const start = await runCli([
@@ -104,18 +110,45 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
       expect(start.exitCode).toBe(0);
       const startJson = JSON.parse(start.stdout);
       pid = startJson.pid;
+      expect(start.stdout).not.toContain(redactionSentinel);
       expect(startJson.ready).toBe(true);
       expect(startJson.server.status).toBe("online");
+      expect(startJson.server.metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
+
+      const list = await runCli(["servers", "--json"], { dbPath });
+      expect(list.exitCode).toBe(0);
+      expect(list.stdout).not.toContain(redactionSentinel);
+      expect(JSON.parse(list.stdout)[0].metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
+
+      const get = await runCli(["servers:get", "cli-app", "--json"], { dbPath });
+      expect(get.exitCode).toBe(0);
+      expect(get.stdout).not.toContain(redactionSentinel);
+      expect(JSON.parse(get.stdout).metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
 
       const status = await runCli(["servers:status", "cli-app", "--refresh", "--json"], { dbPath });
       expect(status.exitCode).toBe(0);
+      expect(status.stdout).not.toContain(redactionSentinel);
       const statusJson = JSON.parse(status.stdout);
       expect(statusJson.snapshot.ready).toBe(true);
+      expect(statusJson.server.metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
 
       const debug = await runCli(["servers:debug", "cli-app", "--json"], { dbPath });
       expect(debug.exitCode).toBe(0);
+      expect(debug.stdout).not.toContain(redactionSentinel);
       const debugJson = JSON.parse(debug.stdout);
+      expect(debugJson.server.metadata.env.ANTHROPIC_API_KEY).toBe("[redacted]");
       expect(debugJson.operations.some((op: { operation_type: string }) => op.operation_type === "start")).toBe(true);
+
+      for (const args of [
+        ["servers"],
+        ["servers:get", "cli-app"],
+        ["servers:status", "cli-app", "--refresh"],
+        ["servers:debug", "cli-app"],
+      ]) {
+        const table = await runCli(args, { dbPath });
+        expect(table.exitCode).toBe(0);
+        expect(table.stdout).not.toContain(redactionSentinel);
+      }
 
       const logs = await runCli(["servers:logs", "cli-app", "--lines", "20"], { dbPath });
       expect(logs.exitCode).toBe(0);
