@@ -132,9 +132,24 @@ function wantsJson(opts: Record<string, any>): boolean {
 
 const REDACTED_VALUE = "[redacted]";
 const SENSITIVE_KEY_PATTERN = /(?:^|[_-])(secret|token|key|password|passwd|credential|authorization|auth|cookie|session|private)(?:$|[_-])/i;
+const SENSITIVE_KEY_WORDS = new Set(["secret", "token", "key", "password", "passwd", "credential", "authorization", "auth", "cookie", "session", "private"]);
+
+function splitIdentifierWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+}
 
 function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_KEY_PATTERN.test(key) || /api[_-]?key/i.test(key) || /access[_-]?token/i.test(key) || /refresh[_-]?token/i.test(key);
+  if (SENSITIVE_KEY_PATTERN.test(key) || /api[_-]?key/i.test(key) || /access[_-]?token/i.test(key) || /refresh[_-]?token/i.test(key)) {
+    return true;
+  }
+
+  return splitIdentifierWords(key).some((word) => SENSITIVE_KEY_WORDS.has(word));
 }
 
 function redactSensitiveString(value: string): string {

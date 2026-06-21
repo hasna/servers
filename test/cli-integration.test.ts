@@ -136,6 +136,38 @@ describe("CLI integration tests", () => {
     }
   });
 
+  test("server JSON output redacts camelCase secret metadata keys", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    const privateKey = "private-key-sentinel-value";
+    const clientSecret = "client-secret-sentinel-value";
+    const sessionCookie = "session-cookie-sentinel-value";
+    const metadata = JSON.stringify({
+      privateKey,
+      oauth: {
+        clientSecret,
+        sessionCookie,
+      },
+      harmless: "visible-value",
+    });
+
+    try {
+      await run(`${CLI} ${dbFlag} servers:add -n "Secret Server" --slug secret-server --metadata '${metadata}'`);
+
+      const { stdout } = await run(`${CLI} ${dbFlag} servers:get secret-server --json`);
+      const parsed = JSON.parse(stdout);
+
+      expect(stdout).not.toContain(privateKey);
+      expect(stdout).not.toContain(clientSecret);
+      expect(stdout).not.toContain(sessionCookie);
+      expect(parsed.metadata.privateKey).toBe("[redacted]");
+      expect(parsed.metadata.oauth.clientSecret).toBe("[redacted]");
+      expect(parsed.metadata.oauth.sessionCookie).toBe("[redacted]");
+      expect(parsed.metadata.harmless).toBe("visible-value");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("server CLI rejects malformed numeric options", async () => {
     const { dbFlag, cleanup } = withTmpDb();
     const appDir = mkdtempSync(join(tmpdir(), "servers-init-app-"));
