@@ -62,7 +62,7 @@ export function registerOperationTools(server: McpServer, { shouldRegisterTool, 
       {
         server_id: z.string().optional(),
         status: z.enum(["pending", "running", "completed", "failed", "cancelled"]).optional(),
-        limit: z.number().optional().default(50),
+        limit: z.number().int().positive().optional().default(50),
       },
       async ({ server_id, status, limit }) => {
         try {

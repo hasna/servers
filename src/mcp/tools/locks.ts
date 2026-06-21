@@ -19,7 +19,7 @@ export function registerLockTools(server: McpServer, { shouldRegisterTool, forma
         resource_id: z.string(),
         agent_id: z.string(),
         lock_type: z.enum(["advisory", "exclusive"]).optional().default("advisory"),
-        expiry_minutes: z.number().optional().default(5).describe("Lock duration in minutes"),
+        expiry_minutes: z.number().int().positive().optional().default(5).describe("Lock duration in minutes"),
       },
       async ({ resource_type, resource_id, agent_id, lock_type, expiry_minutes }) => {
         try {

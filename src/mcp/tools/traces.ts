@@ -52,7 +52,7 @@ export function registerTraceTools(server: McpServer, { shouldRegisterTool, form
       {
         server_id: z.string().optional(),
         operation_id: z.string().nullable().optional(),
-        limit: z.number().optional().default(100),
+        limit: z.number().int().positive().optional().default(100),
       },
       async ({ server_id, operation_id, limit }) => {
         try {
@@ -69,7 +69,7 @@ export function registerTraceTools(server: McpServer, { shouldRegisterTool, form
     server.tool(
       "list_traces_by_agent",
       "List audit trail entries by agent.",
-      { agent_id: z.string(), limit: z.number().optional().default(50) },
+      { agent_id: z.string(), limit: z.number().int().positive().optional().default(50) },
       async ({ agent_id, limit }) => {
         try {
           const traces = listTracesByAgent(agent_id, limit);

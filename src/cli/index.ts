@@ -74,6 +74,7 @@ import {
   stopLocalServer,
 } from "../runtime/local-server.js";
 import type { Server, UpdateServerInput } from "../types/index.js";
+import { parseStrictInteger, type StrictIntegerOptions } from "../utils/integers.js";
 
 function getVersion(): string {
   try {
@@ -163,11 +164,7 @@ function buildServerMetadata(opts: {
   }
 
   if (opts.tailscalePort !== undefined) {
-    const port = Number.parseInt(opts.tailscalePort, 10);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      console.error(chalk.red("--tailscale-port must be an integer from 1 to 65535"));
-      process.exit(1);
-    }
+    const port = parseIntegerOption(opts.tailscalePort, "--tailscale-port", { min: 1, max: 65535 });
     metadata.tailscale_port = port;
   }
 
@@ -186,14 +183,22 @@ function collectValue(value: string, previous: string[]): string[] {
   return previous;
 }
 
-function parseIntegerOption(value: string | undefined, optionName: string): number | undefined {
+function parseIntegerOption(value: string | undefined, optionName: string, options: StrictIntegerOptions = {}): number | undefined {
   if (value === undefined) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed)) {
-    console.error(chalk.red(`${optionName} must be an integer`));
+  try {
+    return parseStrictInteger(value, optionName, options);
+  } catch (error: any) {
+    console.error(chalk.red(error.message));
     process.exit(1);
   }
-  return parsed;
+}
+
+function parsePortOption(value: string | undefined, optionName: string): number | undefined {
+  return parseIntegerOption(value, optionName, { min: 1, max: 65535 });
+}
+
+function parsePositiveIntegerOption(value: string | undefined, optionName: string): number | undefined {
+  return parseIntegerOption(value, optionName, { min: 1 });
 }
 
 function parseEnvOptions(values?: string[]): Record<string, string> | undefined {
@@ -236,14 +241,14 @@ function lifecycleOptions(opts: Record<string, any>) {
     reason: opts.reason,
     command: opts.command,
     cwd: opts.cwd,
-    port: parseIntegerOption(opts.port, "--port"),
+    port: parsePortOption(opts.port, "--port"),
     healthUrl: opts.healthUrl,
     env: parseEnvOptions(opts.env),
     wait: opts.wait,
     waitForLock: Boolean(opts.waitLock),
-    lockTimeoutMs: parseIntegerOption(opts.lockTimeout, "--lock-timeout"),
-    readyTimeoutMs: parseIntegerOption(opts.timeout, "--timeout"),
-    stopTimeoutMs: parseIntegerOption(opts.stopTimeout || opts.timeout, opts.stopTimeout ? "--stop-timeout" : "--timeout"),
+    lockTimeoutMs: parsePositiveIntegerOption(opts.lockTimeout, "--lock-timeout"),
+    readyTimeoutMs: parsePositiveIntegerOption(opts.timeout, "--timeout"),
+    stopTimeoutMs: parsePositiveIntegerOption(opts.stopTimeout || opts.timeout, opts.stopTimeout ? "--stop-timeout" : "--timeout"),
     logFile: opts.logFile,
     force: opts.force,
   };
@@ -660,7 +665,7 @@ program
       const resolved = resolvePartialId(db, "servers", serverId);
       if (resolved) serverId = resolved;
     }
-    const ops = listOperations(serverId, opts.status, parseInt(opts.limit), db);
+    const ops = listOperations(serverId, opts.status, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
     if (wantsJson(opts)) {
       console.log(JSON.stringify(ops, null, 2));
     } else {
@@ -786,9 +791,9 @@ program
     const db = initDb(opts);
     let traces: any[];
     if (opts.agent) {
-      traces = listTracesByAgent(opts.agent, parseInt(opts.limit), db);
+      traces = listTracesByAgent(opts.agent, parsePositiveIntegerOption(opts.limit, "--limit") ?? 100, db);
     } else {
-      traces = listTraces(opts.server, undefined, parseInt(opts.limit), db);
+      traces = listTraces(opts.server, undefined, parsePositiveIntegerOption(opts.limit, "--limit") ?? 100, db);
     }
     if (wantsJson(opts)) {
       console.log(JSON.stringify(traces, null, 2));
@@ -992,7 +997,7 @@ program
     const projectPath = resolve(opts.path || gitRoot || process.cwd());
     const name = opts.name || displayNameForServerConfig(projectPath);
     const projectName = opts.projectName || name;
-    const port = parseIntegerOption(opts.port, "--port");
+    const port = parsePortOption(opts.port, "--port");
     const env = parseEnvOptions(opts.env);
     const detected = opts.command
       ? {
@@ -1199,7 +1204,7 @@ program
   .action(async (idOrSlug, opts) => {
     const db = initDb(opts);
     const server = resolveServerOrExit(idOrSlug, db);
-    const snapshot = await getLocalServerSnapshot(server, { timeoutMs: parseIntegerOption(opts.timeout, "--timeout") });
+    const snapshot = await getLocalServerSnapshot(server, { timeoutMs: parsePositiveIntegerOption(opts.timeout, "--timeout") });
     let updated = server;
     if (opts.refresh) {
       updated = updateServer(server.id, {
@@ -1233,7 +1238,7 @@ program
   .action(async (idOrSlug, opts) => {
     const db = initDb(opts);
     const server = resolveServerOrExit(idOrSlug, db);
-    const timeoutMs = parseIntegerOption(opts.timeout, "--timeout") ?? 30000;
+    const timeoutMs = parsePositiveIntegerOption(opts.timeout, "--timeout") ?? 30000;
     const target = opts.state === "offline" ? "offline" : "online";
     const deadline = Date.now() + timeoutMs;
     let snapshot = await getLocalServerSnapshot(server);
@@ -1270,7 +1275,7 @@ program
       process.exit(1);
     }
     const lines = readFileSync(logFile, "utf-8").split(/\r?\n/);
-    const count = parseIntegerOption(opts.lines, "--lines") ?? 80;
+    const count = parsePositiveIntegerOption(opts.lines, "--lines") ?? 80;
     console.log(lines.slice(-count).join("\n"));
     closeDatabase();
   });
@@ -1433,7 +1438,7 @@ program
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
-    const deliveries = listDeliveries(opts.webhook, parseInt(opts.limit), db);
+    const deliveries = listDeliveries(opts.webhook, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
     if (wantsJson(opts)) {
       console.log(JSON.stringify(deliveries, null, 2));
     } else {
@@ -1481,7 +1486,7 @@ program
   .description("Watch server status with auto-refresh")
   .option("-i, --interval <ms>", "Refresh interval in ms", "5000")
   .action((opts) => {
-    const interval = parseInt(opts.interval);
+    const interval = parsePositiveIntegerOption(opts.interval, "--interval") ?? 5000;
     const tick = () => {
       try {
         closeDatabase();

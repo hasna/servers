@@ -46,8 +46,20 @@ describe("resolveHttpPort", () => {
     expect(resolveHttpPort(8834, { MCP_HTTP_PORT: "9000" }, ["--port", "9100"])).toBe(9100);
   });
 
+  it("rejects malformed --port values", () => {
+    expect(() => resolveHttpPort(8834, {}, ["--port", "9100abc"])).toThrow("--port must be an integer");
+  });
+
+  it("rejects --port without a value", () => {
+    expect(() => resolveHttpPort(8834, { MCP_HTTP_PORT: "9000" }, ["--port"])).toThrow("--port must be an integer");
+  });
+
   it("uses MCP_HTTP_PORT when --port is absent", () => {
     expect(resolveHttpPort(8834, { MCP_HTTP_PORT: "9000" }, [])).toBe(9000);
+  });
+
+  it("rejects malformed MCP_HTTP_PORT values", () => {
+    expect(() => resolveHttpPort(8834, { MCP_HTTP_PORT: "9000abc" }, [])).toThrow("MCP_HTTP_PORT must be an integer");
   });
 
   it("falls back to default port", () => {

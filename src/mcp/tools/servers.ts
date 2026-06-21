@@ -35,7 +35,7 @@ export function registerServerTools(server: McpServer, { shouldRegisterTool, for
         status: z.enum(["online", "offline", "starting", "stopping", "restarting", "deploying", "maintenance", "unknown"]).optional(),
         metadata: z.object({
           tailscale_hostname: z.string().optional().describe("Tailscale machine name (e.g. spark01)"),
-          tailscale_port: z.number().optional().describe("Port the server listens on for Tailscale URL"),
+          tailscale_port: z.number().int().min(1).max(65535).optional().describe("Port the server listens on for Tailscale URL"),
         }).catchall(z.unknown()).optional().describe("Server metadata, including Tailscale config"),
         project_id: z.string().optional(),
       },

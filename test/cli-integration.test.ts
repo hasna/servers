@@ -23,6 +23,19 @@ async function run(cmd: string) {
   return { stdout, stderr };
 }
 
+async function runExpectFailure(cmd: string, opts: { timeoutMs?: number } = {}) {
+  try {
+    await execAsync(cmd, { env: { ...process.env }, timeout: opts.timeoutMs });
+  } catch (error: any) {
+    return {
+      stdout: error.stdout ?? "",
+      stderr: error.stderr ?? "",
+      code: error.code,
+    };
+  }
+  throw new Error(`Command unexpectedly succeeded: ${cmd}`);
+}
+
 describe("CLI integration tests", () => {
 
   test("version reports package version", async () => {
@@ -119,6 +132,31 @@ describe("CLI integration tests", () => {
       } else {
         process.env.TAILSCALE_TAILNET = previousTailnet;
       }
+      cleanup();
+    }
+  });
+
+  test("server CLI rejects malformed numeric options", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    const appDir = mkdtempSync(join(tmpdir(), "servers-init-app-"));
+    try {
+      const tailscalePort = await runExpectFailure(`${CLI} ${dbFlag} servers:add -n "Bad Port" --tailscale-port 7010abc`);
+      expect(tailscalePort.code).not.toBe(0);
+      expect(tailscalePort.stderr).toContain("--tailscale-port must be an integer from 1 to 65535");
+
+      const lifecyclePort = await runExpectFailure(`${CLI} ${dbFlag} servers:init --name bad-init --path ${appDir} --command "bun run dev" --port 3000ms`);
+      expect(lifecyclePort.code).not.toBe(0);
+      expect(lifecyclePort.stderr).toContain("--port must be an integer");
+
+      const operationsLimit = await runExpectFailure(`${CLI} ${dbFlag} operations --limit -1`);
+      expect(operationsLimit.code).not.toBe(0);
+      expect(operationsLimit.stderr).toContain("--limit must be an integer greater than or equal to 1");
+
+      const monitorInterval = await runExpectFailure(`${CLI} ${dbFlag} monitor --interval 0`, { timeoutMs: 1000 });
+      expect(monitorInterval.code).not.toBe(0);
+      expect(monitorInterval.stderr).toContain("--interval must be an integer greater than or equal to 1");
+    } finally {
+      rmSync(appDir, { recursive: true, force: true });
       cleanup();
     }
   });

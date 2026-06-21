@@ -1,4 +1,5 @@
 import { DEFAULT_MCP_HTTP_PORT } from "./http.js";
+import { parseStrictInteger } from "../utils/integers.js";
 
 export interface ParsedMcpArgResult {
   type: "help" | "version";
@@ -15,11 +16,11 @@ export function resolveHttpPort(
   argv: string[] = process.argv.slice(2),
 ): number {
   const portIndex = argv.indexOf("--port");
-  if (portIndex !== -1 && argv[portIndex + 1]) {
-    return Number.parseInt(argv[portIndex + 1]!, 10);
+  if (portIndex !== -1) {
+    return parseStrictInteger(argv[portIndex + 1] ?? "", "--port", { min: 1, max: 65535 });
   }
   if (env.MCP_HTTP_PORT) {
-    return Number.parseInt(env.MCP_HTTP_PORT, 10);
+    return parseStrictInteger(env.MCP_HTTP_PORT, "MCP_HTTP_PORT", { min: 1, max: 65535 });
   }
   return defaultPort;
 }

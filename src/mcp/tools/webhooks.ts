@@ -81,7 +81,7 @@ export function registerWebhookTools(server: McpServer, { shouldRegisterTool, fo
     server.tool(
       "list_deliveries",
       "List webhook delivery logs.",
-      { webhook_id: z.string().optional(), limit: z.number().optional().default(50) },
+      { webhook_id: z.string().optional(), limit: z.number().int().positive().optional().default(50) },
       async ({ webhook_id, limit }) => {
         try {
           const deliveries = listDeliveries(webhook_id, limit);
