@@ -254,6 +254,69 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     }
   });
 
+  it("infers readiness port from configured PORT environment variable", async () => {
+    const dir = makeTempDir();
+    const port = await getFreePort();
+    const db = getDatabase();
+    let pid: number | undefined;
+
+    try {
+      writeFileSync(
+        join(dir, "server.js"),
+        `
+const { writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const http = require("node:http");
+const server = http.createServer((_req, res) => res.end("ok"));
+setTimeout(() => {
+  server.listen(Number(process.env.PORT), "127.0.0.1", () => {
+    writeFileSync(join(process.cwd(), "listening.txt"), "ready");
+  });
+}, 700);
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`,
+      );
+
+      const server = createServer({
+        name: "env-port-app",
+        status: "offline",
+        path: dir,
+        metadata: {
+          start_command: "exec bun run server.js",
+          cwd: dir,
+          env: { PORT: String(port) },
+        },
+      }, db);
+
+      const started = await startLocalServer(server.id, {
+        agentId: "agent-1",
+        reason: "infer env port",
+        wait: true,
+        readyTimeoutMs: 5000,
+      }, db);
+
+      pid = started.pid;
+      expect(started.ready).toBe(true);
+      expect(started.server.status).toBe("online");
+      expect(started.server.metadata.port).toBe(port);
+      expect(started.server.metadata.health_url).toBe(`http://127.0.0.1:${port}`);
+      expect(started.snapshot.port).toBe(port);
+      expect(started.snapshot.healthUrl).toBe(`http://127.0.0.1:${port}`);
+      expect(existsSync(join(dir, "listening.txt"))).toBe(true);
+    } finally {
+      if (pid) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to start a server while another agent owns the lifecycle lock", async () => {
     const db = getDatabase();
     const server = createServer({

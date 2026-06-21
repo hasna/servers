@@ -123,6 +123,22 @@ function numberValue(value: unknown): number | undefined {
   return undefined;
 }
 
+function integerValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^[+-]?\d+$/.test(trimmed)) return undefined;
+    const parsed = Number(trimmed);
+    if (Number.isSafeInteger(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function portValue(value: unknown): number | undefined {
+  const parsed = integerValue(value);
+  return parsed !== undefined && parsed >= 1 && parsed <= 65535 ? parsed : undefined;
+}
+
 function envValue(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const env: Record<string, string> = {};
@@ -132,6 +148,12 @@ function envValue(value: unknown): Record<string, string> {
     else if (typeof raw === "number" || typeof raw === "boolean") env[key] = String(raw);
   }
   return env;
+}
+
+function metadataPort(metadata: Record<string, unknown>, env = envValue(metadata.env)): number | undefined {
+  return portValue(metadata.port)
+    ?? portValue(metadata.tailscale_port)
+    ?? portValue(env.PORT);
 }
 
 function defaultHealthUrl(port?: number): string | undefined {
@@ -255,7 +277,8 @@ function resolveLifecycleConfig(server: Server, opts: LocalLifecycleOptions = {}
     throw new Error(`Server ${server.slug} has no start command. Configure metadata.start_command or pass --command.`);
   }
 
-  const port = opts.port ?? numberValue(server.metadata.port) ?? numberValue(server.metadata.tailscale_port);
+  const env = { ...envValue(server.metadata.env), ...(opts.env ?? {}) };
+  const port = portValue(opts.port) ?? metadataPort(server.metadata, env);
   const healthUrl = opts.healthUrl ?? stringValue(server.metadata.health_url) ?? defaultHealthUrl(port);
   const logFile = resolve(
     opts.logFile
@@ -268,7 +291,7 @@ function resolveLifecycleConfig(server: Server, opts: LocalLifecycleOptions = {}
     cwd,
     port,
     healthUrl,
-    env: { ...envValue(server.metadata.env), ...(opts.env ?? {}) },
+    env,
     logFile,
     readyTimeoutMs: opts.readyTimeoutMs ?? numberValue(server.metadata.ready_timeout_ms) ?? DEFAULT_READY_TIMEOUT_MS,
     stopTimeoutMs: opts.stopTimeoutMs ?? numberValue(server.metadata.stop_timeout_ms) ?? DEFAULT_STOP_TIMEOUT_MS,
@@ -341,7 +364,7 @@ export async function getLocalServerSnapshot(
 ): Promise<LocalServerSnapshot> {
   const timeoutMs = options.timeoutMs ?? 1000;
   const pid = numberValue(server.metadata.pid) ?? null;
-  const port = numberValue(server.metadata.port) ?? numberValue(server.metadata.tailscale_port) ?? null;
+  const port = metadataPort(server.metadata) ?? null;
   const healthUrl = stringValue(server.metadata.health_url) ?? defaultHealthUrl(port ?? undefined) ?? null;
   const running = isProcessRunning(pid);
   let ready = false;
@@ -381,9 +404,8 @@ function serverProcessTarget(server: Server, opts: LocalLifecycleOptions = {}): 
   return {
     pid: numberValue(server.metadata.pid) ?? null,
     port:
-      opts.port
-      ?? numberValue(server.metadata.port)
-      ?? numberValue(server.metadata.tailscale_port)
+      portValue(opts.port)
+      ?? metadataPort(server.metadata)
       ?? null,
     command:
       opts.command
