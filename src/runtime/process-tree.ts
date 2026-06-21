@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -244,7 +244,7 @@ function cwdOf(pid: number): string | null {
 }
 
 /** Significant tokens of a start command, ignoring shell noise and run wrappers. */
-function commandTokens(command: string): string[] {
+function significantCommandTokens(command: string): string[] {
   const ignore = new Set([
     "exec", "bash", "-lc", "-c", "sh", "env", "run", "bun", "bunx",
     "npm", "pnpm", "yarn", "npx", "node", "&&", "||",
@@ -252,7 +252,126 @@ function commandTokens(command: string): string[] {
   return command
     .split(/\s+/)
     .map((t) => t.trim())
-    .filter((t) => t.length > 1 && !t.startsWith("-") && !ignore.has(t));
+    .filter((t) => t.length > 1 && !t.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) && !ignore.has(t));
+}
+
+function unquoteShellToken(token: string): string {
+  return token.replace(/^['"]+|['";]+$/g, "");
+}
+
+type PackageManager = "bun" | "npm" | "pnpm" | "yarn";
+
+interface PackageScriptInvocation {
+  manager: PackageManager;
+  scriptName: string;
+}
+
+const NPM_LIFECYCLE_SCRIPTS = new Set(["start", "stop", "restart", "test"]);
+const PACKAGE_MANAGER_COMMANDS = new Set<PackageManager>(["bun", "npm", "pnpm", "yarn"]);
+const PACKAGE_MANAGER_COMMANDS_WITH_VALUES = new Set([
+  "-C",
+  "--cwd",
+  "--prefix",
+  "-w",
+  "--workspace",
+  "--filter",
+  "--config",
+  "--userconfig",
+]);
+
+function skipPackageManagerOptions(parts: string[], start: number): number {
+  let index = start;
+  while (index < parts.length) {
+    const part = parts[index]!;
+    if (part === "--") return index + 1;
+    if (!part.startsWith("-")) return index;
+
+    const consumesNext = !part.includes("=") && PACKAGE_MANAGER_COMMANDS_WITH_VALUES.has(part);
+    index++;
+    if (consumesNext && parts[index] && !parts[index]!.startsWith("-")) index++;
+  }
+  return index;
+}
+
+function packageScriptInvocation(command: string): PackageScriptInvocation | null {
+  const parts = command.split(/\s+/).map((part) => unquoteShellToken(part.trim())).filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!PACKAGE_MANAGER_COMMANDS.has(part as PackageManager)) continue;
+    const manager = part as PackageManager;
+    let cursor = skipPackageManagerOptions(parts, i + 1);
+
+    if (manager === "npm") {
+      const npmCommand = parts[cursor];
+      if (!npmCommand) continue;
+      if (npmCommand === "run" || npmCommand === "run-script") {
+        cursor = skipPackageManagerOptions(parts, cursor + 1);
+        const scriptName = parts[cursor];
+        if (scriptName && !scriptName.startsWith("-")) return { manager, scriptName };
+      }
+      if (NPM_LIFECYCLE_SCRIPTS.has(npmCommand)) {
+        return { manager, scriptName: npmCommand };
+      }
+      continue;
+    }
+
+    const next = parts[cursor];
+    if (!next || next.startsWith("-")) continue;
+    if (next === "run") {
+      cursor = skipPackageManagerOptions(parts, cursor + 1);
+      const scriptName = parts[cursor];
+      if (scriptName && !scriptName.startsWith("-")) return { manager, scriptName };
+      continue;
+    }
+    if (!["exec", "x", "dlx", "add", "install", "remove"].includes(next)) {
+      return { manager, scriptName: next };
+    }
+  }
+  return null;
+}
+
+function packageScriptTokens(command: string, cwd: string | null | undefined): string[] {
+  if (!cwd) return [];
+  const invocation = packageScriptInvocation(command);
+  if (!invocation) return [];
+
+  const packageJson = resolve(cwd, "package.json");
+  let pkg: { scripts?: Record<string, unknown> };
+  try {
+    pkg = JSON.parse(readFileSync(packageJson, "utf-8")) as { scripts?: Record<string, unknown> };
+  } catch {
+    return [];
+  }
+
+  const script = pkg.scripts?.[invocation.scriptName];
+  if (typeof script === "string") return significantCommandTokens(script);
+
+  if (
+    invocation.manager === "npm"
+    && invocation.scriptName === "start"
+    && existsSync(resolve(cwd, "server.js"))
+  ) {
+    return significantCommandTokens("node server.js");
+  }
+
+  return [];
+}
+
+function commandTokens(command: string, cwd: string | null | undefined): string[] {
+  const tokens = packageScriptTokens(command, cwd);
+  const fallback = tokens.length > 0 ? tokens : significantCommandTokens(command);
+  if (fallback.length === 1 && ["dev", "start", "stop", "restart", "test", "serve", "server", "watch", "preview"].includes(fallback[0]!.toLowerCase())) {
+    return [];
+  }
+  return fallback;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function commandHasToken(command: string, token: string): boolean {
+  return new RegExp(`(^|[^A-Za-z0-9._-])${escapeRegExp(token)}($|[^A-Za-z0-9._-])`).test(command);
 }
 
 /**
@@ -267,12 +386,12 @@ function findByCommandAndCwd(
   procs: ProcInfo[],
 ): number[] {
   if (!command) return [];
-  const tokens = commandTokens(command);
+  const tokens = commandTokens(command, cwd);
   if (tokens.length === 0) return [];
   const wantCwd = cwd ? resolve(cwd) : null;
   const matches: number[] = [];
   for (const proc of procs) {
-    const hasAll = tokens.every((tok) => proc.command.includes(tok));
+    const hasAll = tokens.every((tok) => commandHasToken(proc.command, tok));
     if (!hasAll) continue;
     if (wantCwd) {
       const procCwd = cwdOf(proc.pid);

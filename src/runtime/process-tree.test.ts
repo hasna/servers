@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  discoverServerPids,
   findListenerPids,
   isAlive,
   isGroupAlive,
@@ -138,6 +139,179 @@ describe("isAlive", () => {
           process.kill(parentPid, "SIGKILL");
         } catch {}
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("discoverServerPids", () => {
+  it("does not match same-cwd processes on a generic package script name alone", async () => {
+    const dir = makeTempDir();
+    try {
+      const child = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000); // dev helper"],
+        { cwd: dir, stdio: "ignore" },
+      );
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "bun run dev", cwd: dir })).not.toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands package scripts before matching same-cwd process commands", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "node actual-server.js" } }));
+      writeFileSync(join(dir, "actual-server.js"), "setInterval(() => {}, 1000);");
+
+      const child = spawn(process.execPath, ["actual-server.js"], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "bun run dev", cwd: dir })).toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands npm start as package scripts.start", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { start: "node actual-start-server.js" } }));
+      writeFileSync(join(dir, "actual-start-server.js"), "setInterval(() => {}, 1000);");
+
+      const child = spawn(process.execPath, ["actual-start-server.js"], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "npm start", cwd: dir })).toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("matches expanded script tokens exactly instead of by substring", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(dir, "vite"), "setInterval(() => {}, 1000);");
+
+      const vite = spawn(process.execPath, ["vite"], { cwd: dir, stdio: "ignore" });
+      const vitestHelper = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000); // vitest helper"],
+        { cwd: dir, stdio: "ignore" },
+      );
+      const vitePid = vite.pid!;
+      const vitestPid = vitestHelper.pid!;
+      spawned.push(vitePid, vitestPid);
+      expect(await waitFor(() => isAlive(vitePid) && isAlive(vitestPid))).toBe(true);
+
+      const discovered = discoverServerPids({ command: "bun run dev", cwd: dir });
+      expect(discovered).toContain(vitePid);
+      expect(discovered).not.toContain(vitestPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands npm run script commands with options before and after run", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { start: "node actual-option-server.js" } }));
+      writeFileSync(join(dir, "actual-option-server.js"), "setInterval(() => {}, 1000);");
+
+      const child = spawn(process.execPath, ["actual-option-server.js"], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "npm run --silent start", cwd: dir })).toContain(childPid);
+      expect(discoverServerPids({ command: "npm --silent run start", cwd: dir })).toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("matches npm start default server.js when scripts.start is absent", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "default-start-app" }));
+      writeFileSync(join(dir, "server.js"), "setInterval(() => {}, 1000);");
+
+      const child = spawn(process.execPath, ["server.js"], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "npm start", cwd: dir })).toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not apply npm start default when package.json is invalid", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), "{ invalid json");
+      writeFileSync(join(dir, "server.js"), "setInterval(() => {}, 1000);");
+
+      const child = spawn(process.execPath, ["server.js"], {
+        cwd: dir,
+        stdio: "ignore",
+      });
+      const childPid = child.pid!;
+      spawned.push(childPid);
+      expect(await waitFor(() => isAlive(childPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "npm start", cwd: dir })).not.toContain(childPid);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not match generic npm lifecycle names without package scripts", async () => {
+    const dir = makeTempDir();
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "lifecycle-no-scripts" }));
+
+      const stopHelper = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000); // stop helper"],
+        { cwd: dir, stdio: "ignore" },
+      );
+      const restartHelper = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000); // restart helper"],
+        { cwd: dir, stdio: "ignore" },
+      );
+      const stopPid = stopHelper.pid!;
+      const restartPid = restartHelper.pid!;
+      spawned.push(stopPid, restartPid);
+      expect(await waitFor(() => isAlive(stopPid) && isAlive(restartPid))).toBe(true);
+
+      expect(discoverServerPids({ command: "npm stop", cwd: dir })).not.toContain(stopPid);
+      expect(discoverServerPids({ command: "npm restart", cwd: dir })).not.toContain(restartPid);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
