@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   findListenerPids,
   isAlive,
+  isGroupAlive,
   killTree,
 } from "./process-tree.js";
 
@@ -101,6 +102,36 @@ describe("isAlive", () => {
       expect(await waitFor(() => processStat(childPid).startsWith("Z"))).toBe(true);
 
       expect(isAlive(childPid)).toBe(false);
+    } finally {
+      if (parentPid) {
+        try {
+          process.kill(parentPid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats zombie process-group leaders as not alive", async () => {
+    const dir = makeTempDir();
+    const pidFile = join(dir, "child.pid");
+    let parentPid: number | undefined;
+
+    try {
+      const parent = spawn(
+        "bash",
+        ["-lc", "set -m; sleep 0.1 & echo $! > \"$1\"; exec sleep 30", "_", pidFile],
+        { stdio: "ignore" },
+      );
+      parentPid = parent.pid!;
+      spawned.push(parentPid);
+
+      expect(await waitFor(() => existsSync(pidFile))).toBe(true);
+      const childPid = Number.parseInt(readFileSync(pidFile, "utf-8"), 10);
+      expect(await waitFor(() => processStat(childPid).startsWith("Z"))).toBe(true);
+
+      expect(isAlive(childPid)).toBe(false);
+      expect(isGroupAlive(childPid)).toBe(false);
     } finally {
       if (parentPid) {
         try {

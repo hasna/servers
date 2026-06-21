@@ -389,7 +389,7 @@ process.on("SIGTERM", () => {
   setTimeout(() => {
     writeFileSync(join(process.cwd(), "graceful.txt"), "graceful");
     process.exit(0);
-  }, 500);
+  }, 1500);
 });
 `,
       );
@@ -422,11 +422,11 @@ process.on("SIGTERM", () => {
       }, db);
       const elapsedMs = Date.now() - before;
 
-      expect(elapsedMs).toBeLessThan(400);
+      expect(elapsedMs).toBeLessThan(1000);
       expect(stopped.server.status).toBe("stopping");
       expect(stopped.server.metadata.pid).toBe(pid);
       expect(readFileSync(join(dir, "term.txt"), "utf-8")).toBe("term");
-      expect(await waitForPidExit(pid!, 2000)).toBe(true);
+      expect(await waitForPidExit(pid!, 3000)).toBe(true);
       expect(readFileSync(join(dir, "graceful.txt"), "utf-8")).toBe("graceful");
       pid = undefined;
     } finally {

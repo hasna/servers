@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readlinkSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -48,7 +48,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+interface ProcessStatus {
+  state: string;
+  processGroup: number;
+}
+
+function readLinuxProcessStatus(pid: number): ProcessStatus | null {
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const end = raw.lastIndexOf(")");
+    if (end === -1) return null;
+    const fields = raw.slice(end + 2).trim().split(/\s+/);
+    const state = fields[0];
+    const processGroup = Number.parseInt(fields[2] ?? "", 10);
+    if (!state || !Number.isInteger(processGroup)) return null;
+    return { state, processGroup };
+  } catch {
+    return null;
+  }
+}
+
 function isZombie(pid: number): boolean {
+  const status = readLinuxProcessStatus(pid);
+  if (status) return status.state === "Z";
+
   try {
     const stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
       stdio: ["ignore", "pipe", "ignore"],
@@ -61,19 +84,43 @@ function isZombie(pid: number): boolean {
   }
 }
 
-function groupHasLiveMember(pgid: number): boolean {
+function groupHasLiveMemberFromProc(pgid: number): boolean | null {
+  let entries;
   try {
-    const out = execFileSync("ps", ["-o", "stat=", "-g", String(pgid)], {
+    entries = readdirSync("/proc", { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  let sawGroup = false;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const status = readLinuxProcessStatus(Number.parseInt(entry.name, 10));
+    if (!status || status.processGroup !== pgid) continue;
+    sawGroup = true;
+    if (status.state !== "Z") return true;
+  }
+  return sawGroup ? false : true;
+}
+
+function groupHasLiveMember(pgid: number): boolean {
+  const procResult = groupHasLiveMemberFromProc(pgid);
+  if (procResult !== null) return procResult;
+
+  try {
+    const out = execFileSync("ps", ["-eo", "pgid=,stat="], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
       timeout: 1000,
     });
     let sawGroup = false;
     for (const line of out.split(/\r?\n/)) {
-      const stat = line.trim();
-      if (!stat) continue;
+      const m = line.match(/^\s*(\d+)\s+(\S+)/);
+      if (!m) continue;
+      const processGroup = Number.parseInt(m[1]!, 10);
+      if (processGroup !== pgid) continue;
       sawGroup = true;
-      if (!stat.startsWith("Z")) return true;
+      if (!m[2]!.startsWith("Z")) return true;
     }
     return sawGroup ? false : true;
   } catch {
