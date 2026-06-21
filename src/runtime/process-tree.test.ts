@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,6 +49,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
   return predicate();
 }
 
+function processStat(pid: number): string {
+  try {
+    return execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
 describe("findListenerPids", () => {
   it("finds the pid listening on a TCP port", async () => {
     const port = await getFreePort();
@@ -67,6 +78,37 @@ describe("findListenerPids", () => {
   it("returns an empty array when nothing listens", async () => {
     const port = await getFreePort();
     expect(findListenerPids(port)).toEqual([]);
+  });
+});
+
+describe("isAlive", () => {
+  it("treats zombie processes as not alive", async () => {
+    const dir = makeTempDir();
+    const pidFile = join(dir, "child.pid");
+    let parentPid: number | undefined;
+
+    try {
+      const parent = spawn(
+        "bash",
+        ["-lc", "sleep 0.1 & echo $! > \"$1\"; exec sleep 30", "_", pidFile],
+        { stdio: "ignore" },
+      );
+      parentPid = parent.pid!;
+      spawned.push(parentPid);
+
+      expect(await waitFor(() => existsSync(pidFile))).toBe(true);
+      const childPid = Number.parseInt(readFileSync(pidFile, "utf-8"), 10);
+      expect(await waitFor(() => processStat(childPid).startsWith("Z"))).toBe(true);
+
+      expect(isAlive(childPid)).toBe(false);
+    } finally {
+      if (parentPid) {
+        try {
+          process.kill(parentPid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

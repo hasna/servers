@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createHttpServer } from "node:http";
@@ -18,6 +19,8 @@ import {
   startLocalServer,
   stopLocalServer,
 } from "./local-server.js";
+
+setDefaultTimeout(10_000);
 
 function setup() {
   process.env["SERVERS_DB_PATH"] = ":memory:";
@@ -52,6 +55,26 @@ async function waitForPidExit(pid: number, timeoutMs = 3000): Promise<boolean> {
   return !isPidRunning(pid);
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return predicate();
+}
+
+function processStat(pid: number): string {
+  try {
+    return execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
 async function getFreePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
     const server = createHttpServer();
@@ -67,6 +90,56 @@ async function getFreePort(): Promise<number> {
     });
   });
 }
+
+describe("getLocalServerSnapshot", () => {
+  it("reports a zombie-only pid as offline", async () => {
+    const dir = makeTempDir();
+    const pidFile = join(dir, "child.pid");
+    let parentPid: number | undefined;
+
+    try {
+      const parent = spawn(
+        "bash",
+        ["-lc", "sleep 0.1 & echo $! > \"$1\"; exec sleep 30", "_", pidFile],
+        { stdio: "ignore" },
+      );
+      parentPid = parent.pid!;
+
+      expect(await waitFor(() => !!parentPid && isPidRunning(parentPid))).toBe(true);
+      expect(await waitFor(() => existsSync(pidFile))).toBe(true);
+      const childPid = Number.parseInt(readFileSync(pidFile, "utf-8"), 10);
+      expect(await waitFor(() => processStat(childPid).startsWith("Z"))).toBe(true);
+
+      const snapshot = await getLocalServerSnapshot({
+        id: "zombie-only",
+        name: "Zombie Only",
+        slug: "zombie-only",
+        hostname: null,
+        path: dir,
+        description: null,
+        status: "online",
+        metadata: { pid: childPid },
+        project_id: null,
+        locked_by: null,
+        locked_at: null,
+        last_heartbeat: null,
+        created_at: "2026-06-21T00:00:00.000Z",
+        updated_at: "2026-06-21T00:00:00.000Z",
+      }, { timeoutMs: 50 });
+
+      expect(snapshot.running).toBe(false);
+      expect(snapshot.ready).toBe(false);
+      expect(snapshot.status).toBe("offline");
+    } finally {
+      if (parentPid) {
+        try {
+          process.kill(parentPid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("detectProjectServerConfig", () => {
   it("detects a Bun JavaScript app from package.json scripts", () => {

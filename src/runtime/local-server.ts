@@ -276,19 +276,7 @@ function resolveLifecycleConfig(server: Server, opts: LocalLifecycleOptions = {}
 }
 
 function isProcessRunning(pid: number | null | undefined): boolean {
-  if (!pid || !Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+  return isGroupAlive(pid) || isAlive(pid);
 }
 
 function sendProcessSignal(pid: number, signal: NodeJS.Signals): void {

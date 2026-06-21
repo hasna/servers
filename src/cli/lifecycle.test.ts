@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 const repoRoot = resolve(import.meta.dir, "..", "..");
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
 const cleanupDirs: string[] = [];
+
+setDefaultTimeout(10_000);
 
 afterEach(() => {
   for (const dir of cleanupDirs.splice(0)) {

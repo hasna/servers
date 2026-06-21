@@ -48,12 +48,47 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function isZombie(pid: number): boolean {
+  try {
+    const stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+      timeout: 1000,
+    }).trim();
+    return stat.startsWith("Z");
+  } catch {
+    return false;
+  }
+}
+
+function groupHasLiveMember(pgid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-eo", "pgid=,stat="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf-8",
+      timeout: 1000,
+    });
+    let sawGroup = false;
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^\s*(\d+)\s+(\S+)/);
+      if (!m) continue;
+      const processGroup = Number.parseInt(m[1]!, 10);
+      if (processGroup !== pgid) continue;
+      sawGroup = true;
+      if (!m[2]!.startsWith("Z")) return true;
+    }
+    return sawGroup ? false : true;
+  } catch {
+    return true;
+  }
+}
+
 /** Liveness check for a single PID (not the group). EPERM counts as alive. */
 export function isAlive(pid: number | null | undefined): boolean {
   if (!pid || !Number.isInteger(pid) || pid < 1) return false;
   try {
     process.kill(pid, 0);
-    return true;
+    return !isZombie(pid);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
@@ -64,7 +99,7 @@ export function isGroupAlive(pid: number | null | undefined): boolean {
   if (!pid || !Number.isInteger(pid) || pid < 1) return false;
   try {
     process.kill(-pid, 0);
-    return true;
+    return groupHasLiveMember(pid);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
