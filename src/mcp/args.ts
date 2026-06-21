@@ -10,14 +10,23 @@ export function isHttpMode(env: NodeJS.ProcessEnv = process.env, argv: string[] 
   return argv.includes("--http") || env.MCP_HTTP === "1";
 }
 
+function readOptionValue(argv: string[], name: string): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === name) return argv[index + 1] ?? "";
+    if (arg?.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
+}
+
 export function resolveHttpPort(
   defaultPort: number = DEFAULT_MCP_HTTP_PORT,
   env: NodeJS.ProcessEnv = process.env,
   argv: string[] = process.argv.slice(2),
 ): number {
-  const portIndex = argv.indexOf("--port");
-  if (portIndex !== -1) {
-    return parseStrictInteger(argv[portIndex + 1] ?? "", "--port", { min: 1, max: 65535 });
+  const portValue = readOptionValue(argv, "--port");
+  if (portValue !== undefined) {
+    return parseStrictInteger(portValue, "--port", { min: 1, max: 65535 });
   }
   if (env.MCP_HTTP_PORT) {
     return parseStrictInteger(env.MCP_HTTP_PORT, "MCP_HTTP_PORT", { min: 1, max: 65535 });
