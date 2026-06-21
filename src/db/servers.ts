@@ -121,7 +121,15 @@ export function lockServer(serverId: string, agentId: string, db?: Database): Se
 
   // Already locked by same agent — extend
   if (existing.locked_by === agentId && !isLockExpired(existing.locked_at)) {
-    return updateServer(serverId, {}, d);
+    const result = d.run(
+      `UPDATE servers
+       SET locked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE id = ? AND locked_by = ? AND locked_at = ?`,
+      [serverId, agentId, existing.locked_at],
+    );
+    if (result.changes === 0) return lockServer(serverId, agentId, d);
+    return getServer(serverId, d)!;
   }
 
   // Locked by another agent

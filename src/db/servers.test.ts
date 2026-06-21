@@ -253,6 +253,21 @@ describe("lockServer", () => {
     expect(second.locked_at! >= first.locked_at!).toBe(true);
   });
 
+  it("refreshes locked_at when same agent extends lock", () => {
+    const db = getDatabase();
+    const s = createServer({ name: "test" });
+    lockServer(s.id, "agent-1");
+
+    const olderLockedAt = new Date(Date.now() - (LOCK_EXPIRY_MINUTES - 1) * 60 * 1000).toISOString();
+    db.run("UPDATE servers SET locked_at = ?, updated_at = ? WHERE id = ?", [olderLockedAt, olderLockedAt, s.id]);
+
+    const extended = lockServer(s.id, "agent-1");
+    expect(extended.locked_by).toBe("agent-1");
+    expect(extended.locked_at).not.toBe(olderLockedAt);
+    expect(Date.parse(extended.locked_at!)).toBeGreaterThan(Date.parse(olderLockedAt));
+    expect(Date.parse(extended.updated_at)).toBeGreaterThan(Date.parse(olderLockedAt));
+  });
+
   it("allows lock takeover when expired", () => {
     const db = getDatabase();
     const s = createServer({ name: "test" });
