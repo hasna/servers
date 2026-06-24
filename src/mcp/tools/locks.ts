@@ -1,6 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { acquireLock, releaseLock, checkLock, cleanExpiredLocks, getLocksByAgent } from "../../db/locks.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  pageItems,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -67,13 +75,18 @@ export function registerLockTools(server: McpServer, { shouldRegisterTool, forma
     server.tool(
       "locks_by_agent",
       "List all active locks held by an agent.",
-      { agent_id: z.string() },
-      async ({ agent_id }) => {
+      {
+        agent_id: z.string(),
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+      },
+      async ({ agent_id, limit, cursor }) => {
         try {
           const locks = getLocksByAgent(agent_id);
           if (locks.length === 0) return { content: [{ type: "text" as const, text: `No locks held by ${agent_id}` }] };
-          const lines = locks.map(l => `${l.resource_type}/${l.resource_id}  ${l.lock_type.padEnd(12)} expires: ${l.expires_at}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const page = pageItems(locks, normalizeListLimit(limit), normalizeCursor(cursor));
+          const lines = page.rows.map(l => `${truncateValue(l.resource_type, 24)}/${truncateValue(l.resource_id, 24)}  ${l.lock_type.padEnd(12)} expires:${l.expires_at}`);
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: page.rows.length, total: page.total, nextCursor: page.nextCursor }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );

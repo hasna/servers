@@ -141,6 +141,42 @@ describe("startMcpHttpServer", () => {
     await client.close();
   });
 
+  it("keeps MCP list tools compact and paginated by default", async () => {
+    httpServer = await startMcpHttpServer({
+      port: 0,
+      healthName: "servers",
+      createServer: createMcpServer,
+    });
+    const port = getListeningPort(httpServer);
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(transport);
+
+    try {
+      for (let i = 0; i < 25; i++) {
+        const suffix = String(i).padStart(2, "0");
+        const created = await client.callTool({
+          name: "create_server",
+          arguments: { name: `MCP Server ${suffix}`, slug: `mcp-server-${suffix}` },
+        });
+        expect(created.isError).not.toBe(true);
+      }
+
+      const firstPage = await client.callTool({ name: "list_servers", arguments: {} });
+      const firstPageText = resultText(firstPage);
+      expect(firstPage.isError).not.toBe(true);
+      expect(firstPageText).toContain("Showing 20 of 25");
+      expect(firstPageText).toContain("cursor=20");
+      expect(firstPageText).toContain("get_server");
+
+      const secondPage = await client.callTool({ name: "list_servers", arguments: { cursor: 20 } });
+      expect(secondPage.isError).not.toBe(true);
+      expect(resultText(secondPage)).toContain("Showing 5 of 25");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("serves multiple concurrent clients from one process", async () => {
     httpServer = await startMcpHttpServer({
       port: 0,

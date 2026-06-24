@@ -24,6 +24,10 @@ Manage servers, agents, operations, webhooks, and audit trails across repositori
 # List servers
 servers servers
 
+# Show more rows or continue a paginated list
+servers servers --limit 50
+servers servers --cursor 20
+
 # Create a server
 servers servers:add --name "api-server" --project "my-project"
 
@@ -42,6 +46,25 @@ servers webhook:add --url "https://hooks.example.com/notify" --events "server.st
 # Show webhook delivery logs
 servers webhooks:logs
 ```
+
+### CLI Output Defaults
+
+Read/list commands are compact by default for agent terminals. Human table output shows essential columns, truncates long values, and limits list-style commands to 20 rows unless you pass `--limit`. When more rows are available, the footer prints the next `--cursor` value.
+
+Use `--verbose` for extra columns, entity detail commands for full human-readable records, and `--json` for machine-readable output:
+
+```bash
+servers servers --verbose
+servers servers:get api-server
+servers agent:get marcus
+servers operation:get <operation-id>
+servers trace:get <trace-id>
+servers project:get <project-id-or-path>
+servers webhook:get <webhook-id>
+servers operations --json
+```
+
+Existing JSON shapes are preserved. For unbounded entity lists such as `servers --json`, JSON remains complete by default; pass `--limit` and `--cursor` when an agent needs bounded JSON.
 
 ### Local App Server Lifecycle
 
@@ -98,6 +121,8 @@ Lifecycle MCP tools:
 - `stop_local_server`
 - `restart_local_server`
 - `get_local_server_status`
+
+MCP list tools also default to compact output. Use `limit`, `cursor`, and `verbose=true` on list tools, or call the corresponding `get_*` tool for a detail view.
 
 ## SDK
 

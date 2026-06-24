@@ -182,7 +182,7 @@ describe("CLI integration tests", () => {
 
       const operationsLimit = await runExpectFailure(`${CLI} ${dbFlag} operations --limit -1`);
       expect(operationsLimit.code).not.toBe(0);
-      expect(operationsLimit.stderr).toContain("--limit must be an integer greater than or equal to 1");
+      expect(operationsLimit.stderr).toContain("--limit must be an integer");
 
       const monitorInterval = await runExpectFailure(`${CLI} ${dbFlag} monitor --interval 0`, { timeoutMs: 1000 });
       expect(monitorInterval.code).not.toBe(0);
@@ -247,6 +247,67 @@ describe("CLI integration tests", () => {
 
       const { stdout: listed } = await run(`${CLI} ${dbFlag} traces`);
       expect(listed).toContain("test.event");
+
+      const { stdout: tracesJson } = await run(`${CLI} ${dbFlag} traces --json`);
+      const traces = JSON.parse(tracesJson);
+      const { stdout: traceDetail } = await run(`${CLI} ${dbFlag} trace:get ${traces[0].id.slice(0, 8)}`);
+      expect(traceDetail).toContain("Trace:");
+      expect(traceDetail).toContain("test.event");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("list commands default to compact paginated output while JSON can stay complete", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      for (let i = 0; i < 25; i++) {
+        const suffix = String(i).padStart(2, "0");
+        await run(`${CLI} ${dbFlag} server:add -n "Compact Server ${suffix}" --slug compact-${suffix} --description "long description ${suffix}"`);
+      }
+
+      const { stdout: listed } = await run(`${CLI} ${dbFlag} servers`);
+      expect(listed).toContain("Showing 20 of 25");
+      expect(listed).toContain("--verbose");
+      expect(listed).toContain("servers:get <id>");
+      expect(listed).toContain("rerun with --cursor 20");
+
+      const { stdout: secondPage } = await run(`${CLI} ${dbFlag} servers --cursor 20`);
+      expect(secondPage).toContain("Showing 5 of 25");
+
+      const { stdout: fullJson } = await run(`${CLI} ${dbFlag} servers --json`);
+      expect(JSON.parse(fullJson)).toHaveLength(25);
+
+      const { stdout: limitedJson } = await run(`${CLI} ${dbFlag} servers --json --limit 3`);
+      expect(JSON.parse(limitedJson)).toHaveLength(3);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("operations list is compact by default and has a detail path", async () => {
+    const { dbFlag, cleanup } = withTmpDb();
+    try {
+      await run(`${CLI} ${dbFlag} server:add -n "Compact Ops Server" --slug compact-ops`);
+      for (let i = 0; i < 25; i++) {
+        await run(`${CLI} ${dbFlag} operation:add --server compact-ops --type deploy --agent agent-${i}`);
+      }
+
+      const { stdout: listed } = await run(`${CLI} ${dbFlag} operations`);
+      expect(listed).toContain("Showing 20");
+      expect(listed).toContain("operation:get <id>");
+      expect(listed).toContain("rerun with --cursor 20");
+
+      const { stdout: highLimit } = await run(`${CLI} ${dbFlag} operations --limit 501`);
+      expect(highLimit).toContain("Showing 25");
+
+      const { stdout: opsJson } = await run(`${CLI} ${dbFlag} operations --json`);
+      const ops = JSON.parse(opsJson);
+      expect(ops).toHaveLength(25);
+
+      const { stdout: detail } = await run(`${CLI} ${dbFlag} operation:get ${ops[0].id.slice(0, 8)}`);
+      expect(detail).toContain("Operation:");
+      expect(detail).toContain("Status:");
     } finally {
       cleanup();
     }

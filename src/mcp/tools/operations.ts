@@ -11,6 +11,13 @@ import {
   cancelOperation,
   deleteOperation,
 } from "../../db/operations.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -62,14 +69,28 @@ export function registerOperationTools(server: McpServer, { shouldRegisterTool, 
       {
         server_id: z.string().optional(),
         status: z.enum(["pending", "running", "completed", "failed", "cancelled"]).optional(),
-        limit: z.number().int().positive().optional().default(50),
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include session, completion, error, and metadata summary"),
       },
-      async ({ server_id, status, limit }) => {
+      async ({ server_id, status, limit, cursor, verbose }) => {
         try {
-          const ops = listOperations(server_id, status, limit);
-          if (ops.length === 0) return { content: [{ type: "text" as const, text: "No operations found." }] };
-          const lines = ops.map(o => `${o.id.slice(0, 8)}  ${o.status.padEnd(11)} ${o.operation_type.padEnd(14)} server:${o.server_id.slice(0, 8)}  ${o.started_at}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const normalizedLimit = normalizeListLimit(limit);
+          const normalizedCursor = normalizeCursor(cursor);
+          const fetched = listOperations(server_id, status, normalizedCursor + normalizedLimit + 1);
+          const ops = fetched.slice(normalizedCursor, normalizedCursor + normalizedLimit);
+          if (ops.length === 0) {
+            const text = normalizedCursor > 0 && fetched.length > 0
+              ? `No operations at cursor ${normalizedCursor}; ${fetched.length} matching operation(s) exist before this page. Use cursor=0 or a smaller cursor.`
+              : "No operations found.";
+            return { content: [{ type: "text" as const, text }] };
+          }
+          const lines = ops.map(o => {
+            const base = `${o.id.slice(0, 8)}  ${o.status.padEnd(11)} ${o.operation_type.padEnd(14)} server:${o.server_id.slice(0, 8)} agent:${truncateValue(o.agent_id, 20)}  ${o.started_at}`;
+            if (!verbose) return base;
+            return `${base} session:${truncateValue(o.session_id, 20)} completed:${truncateValue(o.completed_at, 24)} error:${truncateValue(o.error_message, 48)} metadata:${truncateValue(JSON.stringify(o.metadata), 64)}`;
+          });
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: ops.length, nextCursor: fetched.length > normalizedCursor + normalizedLimit ? normalizedCursor + normalizedLimit : null, detailHint: "get_operation", verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );

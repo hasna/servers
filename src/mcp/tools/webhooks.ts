@@ -1,6 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createWebhook, getWebhook, listWebhooks, deleteWebhook, listDeliveries } from "../../db/webhooks.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  pageItems,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -51,13 +59,22 @@ export function registerWebhookTools(server: McpServer, { shouldRegisterTool, fo
     server.tool(
       "list_webhooks",
       "List all webhooks.",
-      {},
-      async () => {
+      {
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include scope filters and creation time"),
+      },
+      async ({ limit, cursor, verbose }) => {
         try {
           const webhooks = listWebhooks();
           if (webhooks.length === 0) return { content: [{ type: "text" as const, text: "No webhooks found." }] };
-          const lines = webhooks.map(w => `${w.id.slice(0, 8)}  ${w.active ? "active" : "inactive".padEnd(10)} ${w.url}  events: ${w.events.join(",") || "*"}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const page = pageItems(webhooks, normalizeListLimit(limit), normalizeCursor(cursor));
+          const lines = page.rows.map(w => {
+            const base = `${w.id.slice(0, 8)}  ${(w.active ? "active" : "inactive").padEnd(10)} ${truncateValue(w.url, 72)}  events:${truncateValue(w.events.join(",") || "*", 48)}`;
+            if (!verbose) return base;
+            return `${base} server:${truncateValue(w.server_id, 12)} project:${truncateValue(w.project_id, 12)} agent:${truncateValue(w.agent_id, 12)} operation:${truncateValue(w.operation_id, 12)} created:${w.created_at}`;
+          });
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: page.rows.length, total: page.total, nextCursor: page.nextCursor, detailHint: "get_webhook", verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );
@@ -81,13 +98,30 @@ export function registerWebhookTools(server: McpServer, { shouldRegisterTool, fo
     server.tool(
       "list_deliveries",
       "List webhook delivery logs.",
-      { webhook_id: z.string().optional(), limit: z.number().int().positive().optional().default(50) },
-      async ({ webhook_id, limit }) => {
+      {
+        webhook_id: z.string().optional(),
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include response summary"),
+      },
+      async ({ webhook_id, limit, cursor, verbose }) => {
         try {
-          const deliveries = listDeliveries(webhook_id, limit);
-          if (deliveries.length === 0) return { content: [{ type: "text" as const, text: "No deliveries found." }] };
-          const lines = deliveries.map(d => `${d.id.slice(0, 8)}  ${d.event.padEnd(30)} ${d.status_code ?? "-"}  attempt ${d.attempt}  ${d.created_at}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const normalizedLimit = normalizeListLimit(limit);
+          const normalizedCursor = normalizeCursor(cursor);
+          const fetched = listDeliveries(webhook_id, normalizedCursor + normalizedLimit + 1);
+          const deliveries = fetched.slice(normalizedCursor, normalizedCursor + normalizedLimit);
+          if (deliveries.length === 0) {
+            const text = normalizedCursor > 0 && fetched.length > 0
+              ? `No deliveries at cursor ${normalizedCursor}; ${fetched.length} matching delivery record(s) exist before this page. Use cursor=0 or a smaller cursor.`
+              : "No deliveries found.";
+            return { content: [{ type: "text" as const, text }] };
+          }
+          const lines = deliveries.map(d => {
+            const base = `${d.id.slice(0, 8)}  ${truncateValue(d.event, 36).padEnd(36)} status:${d.status_code ?? "-"} attempt:${d.attempt} ${d.created_at}`;
+            if (!verbose) return base;
+            return `${base} response:${truncateValue(d.response, 64)}`;
+          });
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: deliveries.length, nextCursor: fetched.length > normalizedCursor + normalizedLimit ? normalizedCursor + normalizedLimit : null, verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );
