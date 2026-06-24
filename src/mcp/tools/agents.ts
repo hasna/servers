@@ -12,6 +12,14 @@ import {
   updateAgent,
 } from "../../db/agents.js";
 import type { AgentConflictError } from "../../types/index.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  pageItems,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -68,13 +76,23 @@ export function registerAgentTools(server: McpServer, { shouldRegisterTool, form
     server.tool(
       "list_agents",
       "List registered agents.",
-      { status: z.enum(["active", "archived"]).optional() },
-      async ({ status }) => {
+      {
+        status: z.enum(["active", "archived"]).optional(),
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include working directory, capabilities, and description"),
+      },
+      async ({ status, limit, cursor, verbose }) => {
         try {
           const agents = listAgents(status);
           if (agents.length === 0) return { content: [{ type: "text" as const, text: "No agents found." }] };
-          const lines = agents.map(a => `${a.id.slice(0, 8)}  ${a.status.padEnd(10)} ${a.name.padEnd(20)} session: ${a.session_id || "-"}  last: ${a.last_seen_at}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const page = pageItems(agents, normalizeListLimit(limit), normalizeCursor(cursor));
+          const lines = page.rows.map(a => {
+            const base = `${a.id.slice(0, 8)}  ${a.status.padEnd(10)} ${truncateValue(a.name, 24).padEnd(24)} session:${truncateValue(a.session_id, 24)}  last:${a.last_seen_at}`;
+            if (!verbose) return base;
+            return `${base}  cwd:${truncateValue(a.working_dir, 48)} caps:${truncateValue(a.capabilities.join(","), 48)} desc:${truncateValue(a.description, 48)}`;
+          });
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: page.rows.length, total: page.total, nextCursor: page.nextCursor, detailHint: "get_agent", verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );

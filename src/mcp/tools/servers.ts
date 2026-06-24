@@ -13,6 +13,14 @@ import {
 } from "../../db/servers.js";
 import { dispatchWebhook } from "../../db/webhooks.js";
 import { getTailscaleUrl } from "../../utils/tailscale.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  pageItems,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -70,16 +78,24 @@ export function registerServerTools(server: McpServer, { shouldRegisterTool, for
     server.tool(
       "list_servers",
       "List all registered servers.",
-      { project_id: z.string().optional().describe("Filter by project") },
-      async ({ project_id }) => {
+      {
+        project_id: z.string().optional().describe("Filter by project"),
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include path, project, lock, and description columns"),
+      },
+      async ({ project_id, limit, cursor, verbose }) => {
         try {
           const servers = listServers(project_id);
           if (servers.length === 0) return { content: [{ type: "text" as const, text: "No servers found." }] };
-          const lines = servers.map(s => {
+          const page = pageItems(servers, normalizeListLimit(limit), normalizeCursor(cursor));
+          const lines = page.rows.map(s => {
             const ts = getTailscaleUrl(s);
-            return `${s.id.slice(0, 8)}  ${s.status.padEnd(12)} ${s.name.padEnd(20)} ${s.slug}  ${s.hostname || "-"}  ${ts || "-"}`;
+            const base = `${s.id.slice(0, 8)}  ${s.status.padEnd(12)} ${truncateValue(s.name, 24).padEnd(24)} ${truncateValue(s.slug, 28)}  ${truncateValue(s.hostname, 32)}  ${truncateValue(ts, 56)}`;
+            if (!verbose) return base;
+            return `${base}  path:${truncateValue(s.path, 48)} project:${truncateValue(s.project_id, 12)} locked:${truncateValue(s.locked_by, 12)} desc:${truncateValue(s.description, 48)}`;
           });
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: page.rows.length, total: page.total, nextCursor: page.nextCursor, detailHint: "get_server", verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );

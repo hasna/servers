@@ -1,6 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createProject, getProject, getProjectByPath, listProjects, updateProject, deleteProject } from "../../db/projects.js";
+import {
+  appendListFooter,
+  DEFAULT_MCP_LIST_LIMIT,
+  normalizeCursor,
+  normalizeListLimit,
+  pageItems,
+  truncateValue,
+} from "./output.js";
 
 type Helpers = {
   shouldRegisterTool: (name: string) => boolean;
@@ -48,13 +56,22 @@ export function registerProjectTools(server: McpServer, { shouldRegisterTool, fo
     server.tool(
       "list_projects",
       "List all projects.",
-      {},
-      async () => {
+      {
+        limit: z.number().int().positive().optional().default(DEFAULT_MCP_LIST_LIMIT),
+        cursor: z.number().int().nonnegative().optional().default(0),
+        verbose: z.boolean().optional().default(false).describe("Include description and timestamps"),
+      },
+      async ({ limit, cursor, verbose }) => {
         try {
           const projects = listProjects();
           if (projects.length === 0) return { content: [{ type: "text" as const, text: "No projects found." }] };
-          const lines = projects.map(p => `${p.id.slice(0, 8)}  ${p.name.padEnd(20)} ${p.path}`);
-          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+          const page = pageItems(projects, normalizeListLimit(limit), normalizeCursor(cursor));
+          const lines = page.rows.map(p => {
+            const base = `${p.id.slice(0, 8)}  ${truncateValue(p.name, 24).padEnd(24)} ${truncateValue(p.path, 64)}`;
+            if (!verbose) return base;
+            return `${base} desc:${truncateValue(p.description, 48)} created:${p.created_at} updated:${p.updated_at}`;
+          });
+          return { content: [{ type: "text" as const, text: appendListFooter(lines.join("\n"), { shown: page.rows.length, total: page.total, nextCursor: page.nextCursor, detailHint: "get_project", verboseHint: !verbose }) }] };
         } catch (e) { return { content: [{ type: "text" as const, text: formatError(e) }], isError: true }; }
       },
     );

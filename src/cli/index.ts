@@ -28,6 +28,7 @@ import {
 import {
   listAgents,
   registerAgent,
+  getAgent,
   getAgentByName,
   updateAgent,
   heartbeatAgent,
@@ -48,11 +49,13 @@ import {
 import {
   listTraces,
   listTracesByAgent,
+  getTrace,
   createTrace,
   deleteTracesByServer,
 } from "../db/traces.js";
 import {
   listProjects,
+  getProject,
   createProject,
   getProjectByPath,
 } from "../db/projects.js";
@@ -186,6 +189,53 @@ function printJson(value: unknown): void {
 
 function stringifyForDisplay(value: unknown): string {
   return JSON.stringify(redactSensitiveFields(value));
+}
+
+const DEFAULT_LIST_LIMIT = 20;
+const LEGACY_JSON_OPERATION_LIMIT = 50;
+const LEGACY_JSON_TRACE_LIMIT = 100;
+
+function truncateForDisplay(value: unknown, max = 72): string {
+  const text = value == null || value === "" ? "-" : String(redactSensitiveFields(value));
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function parseCursorOption(value: string | undefined): number {
+  return parseIntegerOption(value, "--cursor", { min: 0 }) ?? 0;
+}
+
+function parseListLimitOption(value: string | undefined, fallback: number): number {
+  const parsed = parseIntegerOption(value, "--limit", { min: 1 });
+  return parsed ?? fallback;
+}
+
+function pageItems<T>(items: T[], limit: number, cursor = 0): { rows: T[]; nextCursor: number | null; total: number; cursor: number } {
+  const rows = items.slice(cursor, cursor + limit);
+  const nextCursor = cursor + rows.length < items.length ? cursor + rows.length : null;
+  return { rows, nextCursor, total: items.length, cursor };
+}
+
+function emptyRow(length: number): string[] {
+  return ["(none)", ...Array(Math.max(0, length - 1)).fill("")];
+}
+
+function printListFooter(args: {
+  shown: number;
+  total?: number;
+  nextCursor?: number | null;
+  detailHint?: string;
+  verbose?: boolean;
+}): void {
+  const totalText = args.total === undefined ? `${args.shown}` : `${args.shown} of ${args.total}`;
+  const hints: string[] = [];
+  if (!args.verbose) hints.push(`--verbose`);
+  if (args.detailHint) hints.push(args.detailHint);
+  hints.push(`--json`);
+  if (args.nextCursor !== null && args.nextCursor !== undefined) {
+    hints.push(`rerun with --cursor ${args.nextCursor}`);
+  }
+  console.log(`\nShowing ${totalText}. Use ${hints.join(" or ")} for more.`);
 }
 
 function formatTable(headers: string[], rows: string[][]): string {
@@ -359,10 +409,12 @@ program
     if (servers.length === 0) console.log("    (no servers registered)");
 
     console.log(chalk.bold(`\n  Agents (${agents.length})`));
-    for (const a of agents) {
-      console.log(`    ${chalk.bold(a.name.padEnd(20))} session: ${a.session_id || "-"}  last: ${a.last_seen_at}`);
+    const visibleAgents = agents.slice(0, DEFAULT_LIST_LIMIT);
+    for (const a of visibleAgents) {
+      console.log(`    ${chalk.bold(truncateForDisplay(a.name, 20).padEnd(20))} session: ${truncateForDisplay(a.session_id, 24)}  last: ${a.last_seen_at}`);
     }
     if (agents.length === 0) console.log("    (no active agents)");
+    if (visibleAgents.length < agents.length) console.log(`    (${agents.length - visibleAgents.length} more; use servers agents --cursor ${visibleAgents.length})`);
 
     console.log(chalk.bold(`\n  Recent Operations (${ops.length})`));
     for (const o of ops) {
@@ -386,23 +438,50 @@ program
   .alias("server")
   .description("List registered servers")
   .option("-p, --project <id>", "Filter by project")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show extra columns such as path, project, lock, and description")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
     const servers = listServers(opts.project, db);
     if (wantsJson(opts)) {
-      printJson(servers.map(serverWithComputedFields));
+      const cursor = parseCursorOption(opts.cursor);
+      const limit = opts.limit === undefined ? servers.length || DEFAULT_LIST_LIMIT : parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      printJson(pageItems(servers.map(serverWithComputedFields), limit, cursor).rows);
     } else {
-      const headers = ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL"];
-      const rows = servers.map(s => [
-        s.id.slice(0, 8),
-        s.status === "online" ? chalk.green(s.status) : s.status === "offline" ? chalk.red(s.status) : chalk.yellow(s.status),
-        chalk.bold(s.name),
-        s.slug,
-        s.hostname || "-",
-        getTailscaleUrl(s) || "-",
-      ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", "", ""]]));
+      const limit = parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      const cursor = parseCursorOption(opts.cursor);
+      const page = pageItems(servers, limit, cursor);
+      const headers = opts.verbose
+        ? ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL", "PATH", "PROJECT", "LOCKED", "DESCRIPTION"]
+        : ["ID", "STATUS", "NAME", "SLUG", "HOSTNAME", "TAILSCALE URL"];
+      const rows = page.rows.map(s => {
+        const base = [
+          s.id.slice(0, 8),
+          s.status === "online" ? chalk.green(s.status) : s.status === "offline" ? chalk.red(s.status) : chalk.yellow(s.status),
+          chalk.bold(truncateForDisplay(s.name, 32)),
+          truncateForDisplay(s.slug, 28),
+          truncateForDisplay(s.hostname, 36),
+          truncateForDisplay(getTailscaleUrl(s), 64),
+        ];
+        if (!opts.verbose) return base;
+        return [
+          ...base,
+          truncateForDisplay(s.path, 48),
+          truncateForDisplay(s.project_id, 16),
+          truncateForDisplay(s.locked_by, 16),
+          truncateForDisplay(s.description, 48),
+        ];
+      });
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: page.rows.length,
+        total: page.total,
+        nextCursor: page.nextCursor,
+        detailHint: "servers:get <id>",
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
@@ -617,21 +696,80 @@ program
   .description("List registered agents")
   .option("--json", "Output as JSON")
   .option("--status <status>", "Filter by status (active/archived)")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show working directory, description, and capabilities")
   .action((opts) => {
     const db = initDb(opts);
     const agents = listAgents(opts.status, db);
     if (wantsJson(opts)) {
-      printJson(agents);
+      const cursor = parseCursorOption(opts.cursor);
+      const limit = opts.limit === undefined ? agents.length || DEFAULT_LIST_LIMIT : parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      printJson(pageItems(agents, limit, cursor).rows);
     } else {
-      const headers = ["ID", "STATUS", "NAME", "SESSION", "LAST SEEN"];
-      const rows = agents.map(a => [
-        a.id.slice(0, 8),
-        a.status === "active" ? chalk.green(a.status) : chalk.yellow(a.status),
-        chalk.bold(a.name),
-        a.session_id || "-",
-        a.last_seen_at,
-      ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", ""]]));
+      const limit = parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      const cursor = parseCursorOption(opts.cursor);
+      const page = pageItems(agents, limit, cursor);
+      const headers = opts.verbose
+        ? ["ID", "STATUS", "NAME", "SESSION", "LAST SEEN", "WORKDIR", "CAPABILITIES", "DESCRIPTION"]
+        : ["ID", "STATUS", "NAME", "SESSION", "LAST SEEN"];
+      const rows = page.rows.map(a => {
+        const base = [
+          a.id.slice(0, 8),
+          a.status === "active" ? chalk.green(a.status) : chalk.yellow(a.status),
+          chalk.bold(truncateForDisplay(a.name, 32)),
+          truncateForDisplay(a.session_id, 24),
+          a.last_seen_at,
+        ];
+        if (!opts.verbose) return base;
+        return [
+          ...base,
+          truncateForDisplay(a.working_dir, 48),
+          truncateForDisplay(a.capabilities.join(","), 48),
+          truncateForDisplay(a.description, 48),
+        ];
+      });
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: page.rows.length,
+        total: page.total,
+        nextCursor: page.nextCursor,
+        detailHint: "agent:get <id-or-name>",
+        verbose: opts.verbose,
+      });
+    }
+    closeDatabase();
+  });
+
+program
+  .command("agent:get")
+  .alias("agent:show")
+  .description("Get agent details")
+  .argument("<id-or-name>", "Agent ID, partial ID, or name")
+  .option("--json", "Output as JSON")
+  .action((idOrName, opts) => {
+    const db = initDb(opts);
+    let agent = getAgent(idOrName, db) || getAgentByName(idOrName, db);
+    if (!agent) {
+      const resolved = resolvePartialId(db, "agents", idOrName);
+      if (resolved) agent = getAgent(resolved, db);
+    }
+    if (!agent) {
+      console.error(chalk.red(`Agent not found: ${idOrName}`));
+      process.exit(1);
+    }
+    if (wantsJson(opts)) {
+      printJson(agent);
+    } else {
+      console.log(chalk.bold("Agent:"));
+      console.log(`  ID:           ${agent.id}`);
+      console.log(`  Name:         ${agent.name}`);
+      console.log(`  Status:       ${agent.status}`);
+      console.log(`  Session:      ${agent.session_id || "-"}`);
+      console.log(`  Last seen:    ${agent.last_seen_at}`);
+      console.log(`  Working dir:  ${agent.working_dir || "-"}`);
+      console.log(`  Capabilities: ${agent.capabilities.join(", ") || "-"}`);
+      console.log(`  Description:  ${agent.description || "-"}`);
     }
     closeDatabase();
   });
@@ -713,30 +851,52 @@ program
   .description("List server operations")
   .option("-s, --server <id>", "Filter by server")
   .option("--status <status>", "Filter by status")
-  .option("-l, --limit <n>", "Limit results", "50")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT}; JSON keeps legacy ${LEGACY_JSON_OPERATION_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show session, completion, error, and metadata summary")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
+    const json = wantsJson(opts);
+    const limit = parseListLimitOption(opts.limit, json ? LEGACY_JSON_OPERATION_LIMIT : DEFAULT_LIST_LIMIT);
+    const cursor = parseCursorOption(opts.cursor);
     // Resolve partial server ID if given
     let serverId = opts.server;
     if (serverId && serverId.length < 36) {
       const resolved = resolvePartialId(db, "servers", serverId);
       if (resolved) serverId = resolved;
     }
-    const ops = listOperations(serverId, opts.status, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
-    if (wantsJson(opts)) {
+    const fetched = listOperations(serverId, opts.status, cursor + limit + (json ? 0 : 1), db);
+    const ops = fetched.slice(cursor, cursor + limit);
+    if (json) {
       printJson(ops);
     } else {
-      const headers = ["ID", "STATUS", "TYPE", "SERVER", "AGENT", "STARTED"];
+      const headers = opts.verbose
+        ? ["ID", "STATUS", "TYPE", "SERVER", "AGENT", "SESSION", "STARTED", "COMPLETED", "ERROR", "METADATA"]
+        : ["ID", "STATUS", "TYPE", "SERVER", "AGENT", "STARTED"];
       const rows = ops.map(o => [
         o.id.slice(0, 8),
         o.status === "completed" ? chalk.green(o.status) : o.status === "failed" ? chalk.red(o.status) : chalk.yellow(o.status),
         o.operation_type,
         o.server_id.slice(0, 8),
-        o.agent_id || "-",
+        truncateForDisplay(o.agent_id, 24),
+        ...(opts.verbose ? [
+          truncateForDisplay(o.session_id, 24),
+        ] : []),
         o.started_at,
+        ...(opts.verbose ? [
+          truncateForDisplay(o.completed_at, 24),
+          truncateForDisplay(o.error_message, 48),
+          truncateForDisplay(stringifyForDisplay(o.metadata), 64),
+        ] : []),
       ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", "", ""]]));
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: ops.length,
+        nextCursor: fetched.length > cursor + limit ? cursor + limit : null,
+        detailHint: "operation:get <id>",
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
@@ -764,6 +924,38 @@ program
     }, db);
     await emitWebhook("operation.created", { operation_id: op.id, server_id: op.server_id, agent_id: op.agent_id, operation: op }, db);
     console.log(chalk.green(`Created operation: ${op.id.slice(0, 8)} (${op.operation_type}) on server ${serverId.slice(0, 8)}`));
+    closeDatabase();
+  });
+
+program
+  .command("operation:get")
+  .alias("operation:show")
+  .description("Get operation details")
+  .argument("<id>", "Operation ID or partial ID")
+  .option("--json", "Output as JSON")
+  .action((id, opts) => {
+    const db = initDb(opts);
+    const resolved = id.length < 36 ? resolvePartialId(db, "server_operations", id) || id : id;
+    const op = getOperation(resolved, db);
+    if (!op) {
+      console.error(chalk.red(`Operation not found: ${id}`));
+      process.exit(1);
+    }
+    if (wantsJson(opts)) {
+      printJson(op);
+    } else {
+      console.log(chalk.bold("Operation:"));
+      console.log(`  ID:        ${op.id}`);
+      console.log(`  Status:    ${op.status}`);
+      console.log(`  Type:      ${op.operation_type}`);
+      console.log(`  Server:    ${op.server_id}`);
+      console.log(`  Agent:     ${op.agent_id || "-"}`);
+      console.log(`  Session:   ${op.session_id || "-"}`);
+      console.log(`  Started:   ${op.started_at}`);
+      console.log(`  Completed: ${op.completed_at || "-"}`);
+      console.log(`  Error:     ${op.error_message || "-"}`);
+      console.log(`  Metadata:  ${stringifyForDisplay(op.metadata)}`);
+    }
     closeDatabase();
   });
 
@@ -843,28 +1035,56 @@ program
   .description("List audit trail entries")
   .option("-s, --server <id>", "Filter by server")
   .option("-a, --agent <id>", "Filter by agent")
-  .option("-l, --limit <n>", "Limit results", "100")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT}; JSON keeps legacy ${LEGACY_JSON_TRACE_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show operation IDs and details summary")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
-    let traces: any[];
+    const json = wantsJson(opts);
+    const limit = parseListLimitOption(opts.limit, json ? LEGACY_JSON_TRACE_LIMIT : DEFAULT_LIST_LIMIT);
+    const cursor = parseCursorOption(opts.cursor);
+    let fetched: any[];
     if (opts.agent) {
-      traces = listTracesByAgent(opts.agent, parsePositiveIntegerOption(opts.limit, "--limit") ?? 100, db);
+      fetched = listTracesByAgent(opts.agent, cursor + limit + (json ? 0 : 1), db);
     } else {
-      traces = listTraces(opts.server, undefined, parsePositiveIntegerOption(opts.limit, "--limit") ?? 100, db);
+      fetched = listTraces(opts.server, undefined, cursor + limit + (json ? 0 : 1), db);
     }
-    if (wantsJson(opts)) {
+    const traces = fetched.slice(cursor, cursor + limit);
+    if (json) {
       printJson(traces);
     } else {
-      const headers = ["ID", "EVENT", "SERVER", "AGENT", "CREATED"];
-      const rows = traces.map(t => [
-        t.id.slice(0, 8),
-        t.event,
-        t.server_id.slice(0, 8),
-        t.agent_id || "-",
-        t.created_at,
-      ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", ""]]));
+      const headers = opts.verbose
+        ? ["ID", "EVENT", "SERVER", "OPERATION", "AGENT", "CREATED", "DETAILS"]
+        : ["ID", "EVENT", "SERVER", "AGENT", "CREATED"];
+      const rows = traces.map(t => {
+        const base = [
+          t.id.slice(0, 8),
+          truncateForDisplay(t.event, 40),
+          t.server_id.slice(0, 8),
+        ];
+        if (opts.verbose) {
+          return [
+            ...base,
+            truncateForDisplay(t.operation_id, 12),
+            truncateForDisplay(t.agent_id, 24),
+            t.created_at,
+            truncateForDisplay(stringifyForDisplay(t.details), 64),
+          ];
+        }
+        return [
+          ...base,
+          truncateForDisplay(t.agent_id, 24),
+          t.created_at,
+        ];
+      });
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: traces.length,
+        nextCursor: fetched.length > cursor + limit ? cursor + limit : null,
+        detailHint: "trace:get <id>",
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
@@ -903,26 +1123,73 @@ program
     closeDatabase();
   });
 
+program
+  .command("trace:get")
+  .alias("trace:show")
+  .description("Get trace details")
+  .argument("<id>", "Trace ID or partial ID")
+  .option("--json", "Output as JSON")
+  .action((id, opts) => {
+    const db = initDb(opts);
+    const resolved = id.length < 36 ? resolvePartialId(db, "traces", id) || id : id;
+    const trace = getTrace(resolved, db);
+    if (!trace) {
+      console.error(chalk.red(`Trace not found: ${id}`));
+      process.exit(1);
+    }
+    if (wantsJson(opts)) {
+      printJson(trace);
+    } else {
+      console.log(chalk.bold("Trace:"));
+      console.log(`  ID:        ${trace.id}`);
+      console.log(`  Event:     ${trace.event}`);
+      console.log(`  Server:    ${trace.server_id}`);
+      console.log(`  Operation: ${trace.operation_id || "-"}`);
+      console.log(`  Agent:     ${trace.agent_id || "-"}`);
+      console.log(`  Created:   ${trace.created_at}`);
+      console.log(`  Details:   ${stringifyForDisplay(trace.details)}`);
+    }
+    closeDatabase();
+  });
+
 // ── Projects ─────────────────────────────────────────────────────────────────
 
 program
   .command("projects")
   .description("List projects")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show full descriptions and timestamps")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
     const projects = listProjects(db);
     if (wantsJson(opts)) {
-      printJson(projects);
+      const cursor = parseCursorOption(opts.cursor);
+      const limit = opts.limit === undefined ? projects.length || DEFAULT_LIST_LIMIT : parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      printJson(pageItems(projects, limit, cursor).rows);
     } else {
-      const headers = ["ID", "NAME", "PATH", "DESCRIPTION"];
-      const rows = projects.map(p => [
+      const limit = parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      const cursor = parseCursorOption(opts.cursor);
+      const page = pageItems(projects, limit, cursor);
+      const headers = opts.verbose
+        ? ["ID", "NAME", "PATH", "DESCRIPTION", "CREATED", "UPDATED"]
+        : ["ID", "NAME", "PATH", "DESCRIPTION"];
+      const rows = page.rows.map(p => [
         p.id.slice(0, 8),
-        chalk.bold(p.name),
-        p.path,
-        p.description || "-",
+        chalk.bold(truncateForDisplay(p.name, 32)),
+        truncateForDisplay(p.path, opts.verbose ? 72 : 48),
+        truncateForDisplay(p.description, opts.verbose ? 72 : 40),
+        ...(opts.verbose ? [p.created_at, p.updated_at] : []),
       ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", ""]]));
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: page.rows.length,
+        total: page.total,
+        nextCursor: page.nextCursor,
+        detailHint: "project:get <id-or-path>",
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
@@ -950,26 +1217,81 @@ program
     closeDatabase();
   });
 
+program
+  .command("project:get")
+  .alias("project:show")
+  .description("Get project details")
+  .argument("<id-or-path>", "Project ID, partial ID, or path")
+  .option("--json", "Output as JSON")
+  .action((idOrPath, opts) => {
+    const db = initDb(opts);
+    let project = getProject(idOrPath, db) || getProjectByPath(idOrPath, db);
+    if (!project) {
+      const resolved = resolvePartialId(db, "projects", idOrPath);
+      if (resolved) project = getProject(resolved, db);
+    }
+    if (!project) {
+      console.error(chalk.red(`Project not found: ${idOrPath}`));
+      process.exit(1);
+    }
+    if (wantsJson(opts)) {
+      printJson(project);
+    } else {
+      console.log(chalk.bold("Project:"));
+      console.log(`  ID:          ${project.id}`);
+      console.log(`  Name:        ${project.name}`);
+      console.log(`  Path:        ${project.path}`);
+      console.log(`  Description: ${project.description || "-"}`);
+      console.log(`  Created:     ${project.created_at}`);
+      console.log(`  Updated:     ${project.updated_at}`);
+    }
+    closeDatabase();
+  });
+
 // ── Webhooks ─────────────────────────────────────────────────────────────────
 
 program
   .command("webhooks")
   .description("List webhooks")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show scope filters and creation time")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
     const webhooks = listWebhooks(db);
     if (wantsJson(opts)) {
-      printJson(webhooks);
+      const cursor = parseCursorOption(opts.cursor);
+      const limit = opts.limit === undefined ? webhooks.length || DEFAULT_LIST_LIMIT : parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      printJson(pageItems(webhooks, limit, cursor).rows);
     } else {
-      const headers = ["ID", "STATUS", "URL", "EVENTS"];
-      const rows = webhooks.map(w => [
+      const limit = parseListLimitOption(opts.limit, DEFAULT_LIST_LIMIT);
+      const cursor = parseCursorOption(opts.cursor);
+      const page = pageItems(webhooks, limit, cursor);
+      const headers = opts.verbose
+        ? ["ID", "STATUS", "URL", "EVENTS", "SERVER", "PROJECT", "AGENT", "OPERATION", "CREATED"]
+        : ["ID", "STATUS", "URL", "EVENTS"];
+      const rows = page.rows.map(w => [
         w.id.slice(0, 8),
         w.active ? chalk.green("active") : chalk.red("inactive"),
-        w.url.slice(0, 50),
-        w.events.join(",") || "*",
+        truncateForDisplay(w.url, opts.verbose ? 80 : 50),
+        truncateForDisplay(w.events.join(",") || "*", opts.verbose ? 60 : 36),
+        ...(opts.verbose ? [
+          truncateForDisplay(w.server_id, 12),
+          truncateForDisplay(w.project_id, 12),
+          truncateForDisplay(w.agent_id, 12),
+          truncateForDisplay(w.operation_id, 12),
+          w.created_at,
+        ] : []),
       ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", ""]]));
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: page.rows.length,
+        total: page.total,
+        nextCursor: page.nextCursor,
+        detailHint: "webhook:get <id>",
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
@@ -993,6 +1315,37 @@ program
     }, db);
     await emitWebhook("webhook.created", { webhook_id: webhook.id, webhook }, db);
     console.log(chalk.green(`Created webhook: ${webhook.id.slice(0, 8)}`));
+    closeDatabase();
+  });
+
+program
+  .command("webhook:get")
+  .alias("webhook:show")
+  .description("Get webhook details")
+  .argument("<id>", "Webhook ID or partial ID")
+  .option("--json", "Output as JSON")
+  .action((id, opts) => {
+    const db = initDb(opts);
+    const resolved = id.length < 36 ? resolvePartialId(db, "webhooks", id) || id : id;
+    const webhook = getWebhook(resolved, db);
+    if (!webhook) {
+      console.error(chalk.red(`Webhook not found: ${id}`));
+      process.exit(1);
+    }
+    if (wantsJson(opts)) {
+      printJson(webhook);
+    } else {
+      console.log(chalk.bold("Webhook:"));
+      console.log(`  ID:        ${webhook.id}`);
+      console.log(`  Active:    ${webhook.active ? "yes" : "no"}`);
+      console.log(`  URL:       ${webhook.url}`);
+      console.log(`  Events:    ${webhook.events.join(", ") || "*"}`);
+      console.log(`  Server:    ${webhook.server_id || "-"}`);
+      console.log(`  Project:   ${webhook.project_id || "-"}`);
+      console.log(`  Agent:     ${webhook.agent_id || "-"}`);
+      console.log(`  Operation: ${webhook.operation_id || "-"}`);
+      console.log(`  Created:   ${webhook.created_at}`);
+    }
     closeDatabase();
   });
 
@@ -1492,23 +1845,38 @@ program
   .alias("webhook:deliveries")
   .description("List webhook delivery logs")
   .option("--webhook <id>", "Filter by webhook")
-  .option("-l, --limit <n>", "Limit results", "50")
+  .option("-l, --limit <n>", `Limit rows shown (default: ${DEFAULT_LIST_LIMIT}; JSON keeps legacy ${LEGACY_JSON_OPERATION_LIMIT})`)
+  .option("--cursor <n>", "Zero-based row offset for pagination")
+  .option("--verbose", "Show event and response summary")
   .option("--json", "Output as JSON")
   .action((opts) => {
     const db = initDb(opts);
-    const deliveries = listDeliveries(opts.webhook, parsePositiveIntegerOption(opts.limit, "--limit") ?? 50, db);
-    if (wantsJson(opts)) {
+    const json = wantsJson(opts);
+    const limit = parseListLimitOption(opts.limit, json ? LEGACY_JSON_OPERATION_LIMIT : DEFAULT_LIST_LIMIT);
+    const cursor = parseCursorOption(opts.cursor);
+    const fetched = listDeliveries(opts.webhook, cursor + limit + (json ? 0 : 1), db);
+    const deliveries = fetched.slice(cursor, cursor + limit);
+    if (json) {
       printJson(deliveries);
     } else {
-      const headers = ["ID", "WEBHOOK", "STATUS", "ATTEMPT", "TIME"];
+      const headers = opts.verbose
+        ? ["ID", "WEBHOOK", "STATUS", "EVENT", "ATTEMPT", "TIME", "RESPONSE"]
+        : ["ID", "WEBHOOK", "STATUS", "ATTEMPT", "TIME"];
       const rows = deliveries.map(d => [
         d.id.slice(0, 8),
         d.webhook_id.slice(0, 8),
         d.status_code !== null && d.status_code < 400 ? chalk.green("ok") : chalk.red("fail"),
+        ...(opts.verbose ? [truncateForDisplay(d.event, 40)] : []),
         d.attempt.toString(),
         d.created_at,
+        ...(opts.verbose ? [truncateForDisplay(d.response, 64)] : []),
       ]);
-      console.log(formatTable(headers, rows.length > 0 ? rows : [["(none)", "", "", "", ""]]));
+      console.log(formatTable(headers, rows.length > 0 ? rows : [emptyRow(headers.length)]));
+      printListFooter({
+        shown: deliveries.length,
+        nextCursor: fetched.length > cursor + limit ? cursor + limit : null,
+        verbose: opts.verbose,
+      });
     }
     closeDatabase();
   });
