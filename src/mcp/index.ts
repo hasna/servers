@@ -11,6 +11,7 @@ import { registerTraceTools } from "./tools/traces.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { registerProjectTools } from "./tools/projects.js";
 import { registerLockTools } from "./tools/locks.js";
+import { registerStorageTools } from "./tools/storage.js";
 
 function getMcpVersion(): string {
   try {
@@ -47,6 +48,7 @@ registerTraceTools(server, toolContext);
 registerWebhookTools(server, toolContext);
 registerProjectTools(server, toolContext);
 registerLockTools(server, toolContext);
+registerStorageTools(server, toolContext);
 
 async function main() {
   const transport = new StdioServerTransport();

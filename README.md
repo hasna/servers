@@ -67,6 +67,19 @@ SQLite via `bun:sqlite` with WAL mode. Database location:
 2. Nearest `.servers/servers.db` walking up from cwd
 3. `~/.hasna/servers/servers.db` (default)
 
+## Storage
+
+Native PostgreSQL storage sync is available through the package's own adapter and migrations:
+
+```bash
+export HASNA_SERVERS_DATABASE_URL=postgres://user:pass@host:5432/servers
+servers storage status
+servers storage push
+servers storage pull
+```
+
+`SERVERS_DATABASE_URL` is accepted as a fallback. Set `HASNA_SERVERS_STORAGE_MODE` or `SERVERS_STORAGE_MODE` to `local`, `hybrid`, or `remote` when a caller needs an explicit mode.
+
 ## Install
 
 ```bash

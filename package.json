@@ -1,6 +1,6 @@
 {
   "name": "@hasna/servers",
-  "version": "0.1.3",
+  "version": "0.1.10",
   "description": "Server management for AI coding agents — CLI + MCP server",
   "type": "module",
   "main": "dist/index.js",
@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
     }
   },
   "files": [
@@ -21,7 +25,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/tui/dashboard.tsx --outdir dist/tui --target bun --external ink --external react --external chalk && tsc --emitDeclarationOnly --outDir dist",
+    "build": "rm -rf dist && bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts src/storage.ts --outdir dist --target bun && bun build src/tui/dashboard.tsx --outdir dist/tui --target bun --external ink --external react --external chalk && tsc --emitDeclarationOnly --outDir dist",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.ts",
@@ -52,16 +56,18 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "0.1.28",
+    "@hasna/events": "^0.1.3",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "ink": "^7.0.1",
+    "pg": "^8.13.3",
     "react": "^19.2.5",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/bun": "^1.2.4",
+    "@types/pg": "^8.11.11",
     "@types/react": "^19.2.14",
     "typescript": "^5.7.3"
   }

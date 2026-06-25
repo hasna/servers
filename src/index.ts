@@ -43,6 +43,9 @@ export {
 } from "./db/database.js";
 
 export { runMigrations } from "./db/schema.js";
+export * from "./db/storage-sync.js";
+export * from "./db/remote-storage.js";
+export * from "./db/pg-migrations.js";
 
 export {
   createServer,
