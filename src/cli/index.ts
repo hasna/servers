@@ -103,6 +103,10 @@ function initDb(opts?: { db?: string }) {
   return db;
 }
 
+function resolveOperationId(db: ReturnType<typeof initDb>, id: string): string {
+  return resolvePartialId(db, "server_operations", id) ?? id;
+}
+
 function findNearestGitRoot(startDir: string): string | null {
   let dir = startDir;
   while (true) {
@@ -774,7 +778,8 @@ program
   .action(async (id, opts) => {
     const db = initDb(opts);
     try {
-      const started = startOperation(id, db);
+      const operationId = resolveOperationId(db, id);
+      const started = startOperation(operationId, db);
       await emitWebhook("operation.started", { operation_id: started.id, server_id: started.server_id, agent_id: started.agent_id, operation: started }, db);
       console.log(chalk.green(`Started: ${started.id.slice(0, 8)} → running`));
     } catch (e: any) {
@@ -791,7 +796,8 @@ program
   .action(async (id, opts) => {
     const db = initDb(opts);
     try {
-      const completed = completeOperation(id, db);
+      const operationId = resolveOperationId(db, id);
+      const completed = completeOperation(operationId, db);
       await emitWebhook("operation.completed", { operation_id: completed.id, server_id: completed.server_id, agent_id: completed.agent_id, operation: completed }, db);
       console.log(chalk.green(`Completed: ${completed.id.slice(0, 8)}`));
     } catch (e: any) {
@@ -809,7 +815,8 @@ program
   .action(async (id, opts) => {
     const db = initDb(opts);
     try {
-      const failed = failOperation(id, opts.error || "Unknown error", db);
+      const operationId = resolveOperationId(db, id);
+      const failed = failOperation(operationId, opts.error || "Unknown error", db);
       await emitWebhook("operation.failed", { operation_id: failed.id, server_id: failed.server_id, agent_id: failed.agent_id, operation: failed }, db);
       console.log(chalk.red(`Failed: ${failed.id.slice(0, 8)} — ${failed.error_message}`));
     } catch (e: any) {
@@ -826,7 +833,8 @@ program
   .action(async (id, opts) => {
     const db = initDb(opts);
     try {
-      const cancelled = cancelOperation(id, db);
+      const operationId = resolveOperationId(db, id);
+      const cancelled = cancelOperation(operationId, db);
       await emitWebhook("operation.cancelled", { operation_id: cancelled.id, server_id: cancelled.server_id, agent_id: cancelled.agent_id, operation: cancelled }, db);
       console.log(chalk.yellow(`Cancelled: ${cancelled.id.slice(0, 8)}`));
     } catch (e: any) {

@@ -227,11 +227,12 @@ describe("CLI integration tests", () => {
       const ops = JSON.parse(opsJson);
       expect(ops.length).toBeGreaterThan(0);
       const opId = ops[0].id;
+      const shortOpId = opId.slice(0, 8);
 
-      const { stdout: started } = await run(`${CLI} ${dbFlag} operation:start ${opId}`);
+      const { stdout: started } = await run(`${CLI} ${dbFlag} operation:start ${shortOpId}`);
       expect(started).toContain("running");
 
-      const { stdout: completed } = await run(`${CLI} ${dbFlag} operation:complete ${opId}`);
+      const { stdout: completed } = await run(`${CLI} ${dbFlag} operation:complete ${shortOpId}`);
       expect(completed).toContain("Completed");
     } finally {
       cleanup();
