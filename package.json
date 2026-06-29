@@ -1,6 +1,6 @@
 {
   "name": "@hasna/servers",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Server management for AI coding agents — CLI + MCP server",
   "type": "module",
   "main": "dist/index.js",
@@ -25,6 +25,10 @@
     "build": "rm -rf dist && bun build src/cli/index.ts --outdir dist/cli --target bun --external ink --external react --external chalk && bun build src/mcp/index.ts --outdir dist/mcp --target bun && bun build src/index.ts --outdir dist --target bun && bun build src/tui/dashboard.tsx --outdir dist/tui --target bun --external ink --external react --external chalk && tsc --emitDeclarationOnly --outDir dist -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
+    "no-cloud:pack": "bun run build && bun scripts/no-cloud-artifact-scan.mjs",
+    "prepack": "bun run build && bun scripts/no-cloud-artifact-scan.mjs",
+    "prepublishOnly": "bun test && bun run build && bun scripts/no-cloud-artifact-scan.mjs",
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts"
   },
@@ -53,7 +57,6 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "0.1.28",
     "@hasna/events": "^0.1.3",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
